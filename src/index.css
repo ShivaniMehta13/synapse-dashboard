@@ -52,14 +52,15 @@
 
 body {
   margin: 0;
+  min-width: 320px;
+  min-height: 100svh;
+  background: var(--bg);
 }
 
 #root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
+  width: 100%;
+  min-width: 0;
+  text-align: left;
   min-height: 100svh;
   display: flex;
   flex-direction: column;
