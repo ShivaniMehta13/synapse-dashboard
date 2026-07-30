@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { fetchAgents, fetchTraces } from "./services/api";
 
 /* ============================================================================
@@ -492,9 +492,7 @@ function parseTraceToAgentRun(trace) {
   };
 }
 
-function calculateDashboardMetrics(traces) {
-  // The backend already filters traces to this dashboard's flow.
-  const runs = traces.map(parseTraceToAgentRun);
+function calculateMetricsFromRuns(runs) {
   const ok = runs.filter((r) => r.status === "Completed");
   const failed = runs.filter((r) => r.status === "Failed");
   const avg = (arr) => (arr.length ? Math.round(arr.reduce((s, r) => s + r.latencyMs, 0) / arr.length) : 0);
@@ -518,7 +516,33 @@ function calculateDashboardMetrics(traces) {
   };
 }
 
+function calculateDashboardMetrics(traces) {
+  // The backend already filters traces to this dashboard's flow.
+  return calculateMetricsFromRuns(traces.map(parseTraceToAgentRun));
+}
+
 /* -------------------------------- utilities ------------------------------- */
+
+function getRunsForAgent(runs, agent) {
+  if (!agent) return runs || [];
+  return (runs || []).filter((run) =>
+    run.agentId === agent.id || run.agentLabel === agent.label
+  );
+}
+
+function getRecentQueriesForAgent(runs, agent, limit = 4) {
+  const seen = new Set();
+  return getRunsForAgent(runs, agent)
+    .slice()
+    .sort((a, b) => new Date(b.startTime) - new Date(a.startTime))
+    .map((run) => (run.query || "").trim())
+    .filter((query) => {
+      if (!query || seen.has(query)) return false;
+      seen.add(query);
+      return true;
+    })
+    .slice(0, limit);
+}
 
 const fmtMs = (ms) => (ms == null ? "—" : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
 const fmtFriendly = (ms) => {
@@ -810,7 +834,7 @@ function OverviewPage({ metrics, onOpenRequest, selectedAgentId, agents }) {
   const connectorSub = isAllAgents ? "All configured connectors" : `${selectedAgentLabel} connector`;
   const workflowSub = isAllAgents ? "All configured workflows" : `${selectedAgentLabel} workflow`;
   const overviewSubheading = isAllAgents ? "Your agents at a glance." : `Your ${selectedAgentLabel} at a glance.`;
-  const howItWorksAgentText = isAllAgents ? "selected agent" : selectedAgentLabel;
+  const howItWorksAgentText = isAllAgents ? "The selected agent" : `The ${selectedAgentLabel}`;
   return (
     <div>
       <div className="syn-row syn-page-head" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -833,18 +857,18 @@ function OverviewPage({ metrics, onOpenRequest, selectedAgentId, agents }) {
       <div className="syn-card syn-overview-how">
         <div style={{ fontWeight: 650, fontSize: 14.5, marginBottom: 4 }}>How it works</div>
         <p style={{ margin: 0, fontSize: 13.5, color: "var(--ink-2)" }}>
-          Your team asks a market or portfolio news question. The <strong>{howItWorksAgentText}</strong> reads it,
-          checks current financial news and portfolio context, then returns a concise intelligence summary. Every request is recorded under{" "}
+          Your team sends a request. <strong>{howItWorksAgentText}</strong> reads it,
+          gathers what it needs, and returns an answer. Every request is recorded under{" "}
           <strong>Work Done by Agent</strong>.
         </p>
         <Advanced title="Advanced details — flow & technical stats">
           <div style={{ marginTop: 10 }}>
             <Pipeline nodes={[
-              { t: "Chat query", d: "Market question" },
+              { t: "Incoming request", d: "Submitted by a user" },
               { t: "Agent", d: "Interprets the request", hot: true },
-              { t: "News source", d: "Financial intelligence" },
-              { t: "Portfolio context", d: "Relevant holdings" },
-              { t: "Chat answer", d: "Summary returned" },
+              { t: "Tools or sources", d: "Information gathered" },
+              { t: "Reasoning step", d: "Context applied" },
+              { t: "Response", d: "Answer returned" },
               { t: "Work log", d: "Run recorded" },
             ]} />
           </div>
@@ -884,30 +908,30 @@ function ConnectorPage({ onOpenRequest, selectedAgentId, agents }) {
               <span className="syn-chip chip-ok" style={{ marginLeft: "auto" }}><span className="syn-dot" />Connected</span>
             </div>
             <p style={{ margin: "0 0 10px", fontSize: 13, color: "var(--ink-2)" }}>
-              Pulls financial-news signals and portfolio context so the agent can answer market, company, and holdings-related questions.
+              Provides the information or actions this agent needs to handle incoming requests.
             </p>
             <span className="syn-label">What it enables</span>
             <ul style={{ margin: "7px 0 0", paddingLeft: 18, fontSize: 13, color: "var(--ink-2)", display: "flex", flexDirection: "column", gap: 4 }}>
-              <li>Read direct chat questions about markets and portfolios</li>
-              <li>Retrieve recent financial news and relevant context</li>
-              <li>Summarise key developments and likely portfolio impact</li>
-              <li>Highlight notable risks or items that need follow-up</li>
+              <li>Receive requests for {agent.label}</li>
+              <li>Gather the context needed for a useful response</li>
+              <li>Return an answer through the configured workflow</li>
+              <li>Log outcomes and notable issues for review</li>
             </ul>
             <Advanced title="Advanced details">
               <div className="syn-kv" style={{ gridTemplateColumns: "110px 1fr", marginTop: 8 }}>
-                <div className="k">Source</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>Financial news and portfolio context</div>
+                <div className="k">Source</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>{agent.label} configured source</div>
                 <div className="k">Called by</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>Langflow direct run</div>
-                <div className="k">Scope</div><div className="v" style={{ fontSize: 12 }}>Recent financial news, companies, markets, and portfolio relevance</div>
+                <div className="k">Scope</div><div className="v" style={{ fontSize: 12 }}>Requests handled by {agent.label}</div>
               </div>
               <div className="syn-note" style={{ marginTop: 10 }}>
-                Some live sources may take longer to respond during busy market-news periods. Slower runs show as latency, not necessarily failure.
+                Some live sources may take longer to respond. Slower runs show as latency, not necessarily failure.
               </div>
             </Advanced>
           </div>
         ))}
       </div>
       <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 14 }}>
-        Need the agent to work with another data source or portfolio system? Use{" "}
+        Need the agent to work with another source or system? Use{" "}
         <button className="syn-btn" style={{ padding: "3px 10px", fontSize: 12 }} onClick={onOpenRequest}>Report Issue / Request Agent Change</button>
       </p>
     </div>
@@ -931,50 +955,58 @@ function WorkflowPage({ metrics, onOpenRequest, selectedAgentId, agents }) {
         </button>
       </div>
       <div className="syn-grid" style={{ gridTemplateColumns: "minmax(0, 640px)" }}>
-        {visibleAgents.map((agent) => (
-          <div className="syn-card" key={agent.id}>
-            <div className="syn-row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-              <div className="syn-conn-name">{agent.label} workflow</div>
-              <span className="syn-chip chip-ok"><span className="syn-dot" />Active</span>
-            </div>
-            <div className="syn-kv" style={{ gridTemplateColumns: "95px 1fr", marginBottom: 10 }}>
-              <div className="k">Agent</div><div className="v">{agent.label}</div>
-              <div className="k">Connector</div><div className="v">{agent.label} connector</div>
-              <div className="k">Trigger</div><div className="v">A team member asks a financial news or portfolio question in chat</div>
-              <div className="k">Output</div><div className="v">The agent returns a concise answer with relevant developments and context</div>
-            </div>
-            <span className="syn-label">Example requests</span>
-            <div className="syn-taglist" style={{ marginTop: 7 }}>
-              {["“Show me past 5 days news”", "“What changed for my portfolio?”", "“Summarise latest market news”", "“Which holdings need attention?”"].map((t) => (
-                <span key={t} className="syn-tag">{t}</span>
-              ))}
-            </div>
-            <Advanced title="Workflow statistics">
-              <div className="syn-kv" style={{ gridTemplateColumns: "170px 1fr", marginTop: 8 }}>
-                <div className="k">Requests handled (in view)</div><div className="v syn-mono">{fmtNum(m.total)}</div>
-                <div className="k">Successful responses</div><div className="v syn-mono">{fmtNum(m.successful)}</div>
-                <div className="k">Issues</div><div className="v syn-mono">{fmtNum(m.failed)}</div>
-                <div className="k">Items flagged</div><div className="v syn-mono">{fmtNum(m.discrepancies)}</div>
-                <div className="k">Average response time</div><div className="v syn-mono">{fmtMs(m.avgLatencyMs)}</div>
-                <div className="k">Slower runs (service idle)</div><div className="v syn-mono">{fmtNum(m.slowRuns)}</div>
-                <div className="k">Last run</div><div className="v syn-mono">{m.lastRun ? fmtTime(m.lastRun.startTime) : "—"}</div>
+        {visibleAgents.map((agent) => {
+          const agentRuns = getRunsForAgent(m.runs, agent);
+          const agentMetrics = calculateMetricsFromRuns(agentRuns);
+          const exampleQueries = getRecentQueriesForAgent(m.runs, agent);
+          return (
+            <div className="syn-card" key={agent.id}>
+              <div className="syn-row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                <div className="syn-conn-name">{agent.label} workflow</div>
+                <span className="syn-chip chip-ok"><span className="syn-dot" />Active</span>
               </div>
-              <p style={{ fontSize: 12, color: "var(--muted)", margin: "10px 0 0" }}>
-                Each run is executed as a Langflow trace, then logged with its response time, status, and any notable flags.
-              </p>
-            </Advanced>
-          </div>
-        ))}
+              <div className="syn-kv" style={{ gridTemplateColumns: "95px 1fr", marginBottom: 10 }}>
+                <div className="k">Agent</div><div className="v">{agent.label}</div>
+                <div className="k">Connector</div><div className="v">{agent.label} connector</div>
+                <div className="k">Trigger</div><div className="v">A team member sends a request to {agent.label}</div>
+                <div className="k">Output</div><div className="v">The agent returns an answer using its configured workflow</div>
+              </div>
+              <span className="syn-label">Example requests</span>
+              <div className="syn-taglist" style={{ marginTop: 7 }}>
+                {exampleQueries.length > 0
+                  ? exampleQueries.map((query) => (
+                    <span key={query} className="syn-tag">{query}</span>
+                  ))
+                  : <span className="syn-tag">No recent requests in view</span>}
+              </div>
+              <Advanced title="Workflow statistics">
+                <div className="syn-kv" style={{ gridTemplateColumns: "170px 1fr", marginTop: 8 }}>
+                  <div className="k">Requests handled (in view)</div><div className="v syn-mono">{fmtNum(agentMetrics.total)}</div>
+                  <div className="k">Successful responses</div><div className="v syn-mono">{fmtNum(agentMetrics.successful)}</div>
+                  <div className="k">Issues</div><div className="v syn-mono">{fmtNum(agentMetrics.failed)}</div>
+                  <div className="k">Items flagged</div><div className="v syn-mono">{fmtNum(agentMetrics.discrepancies)}</div>
+                  <div className="k">Average response time</div><div className="v syn-mono">{fmtMs(agentMetrics.avgLatencyMs)}</div>
+                  <div className="k">Slower runs (service idle)</div><div className="v syn-mono">{fmtNum(agentMetrics.slowRuns)}</div>
+                  <div className="k">Last run</div><div className="v syn-mono">{agentMetrics.lastRun ? fmtTime(agentMetrics.lastRun.startTime) : "—"}</div>
+                </div>
+                <p style={{ fontSize: 12, color: "var(--muted)", margin: "10px 0 0" }}>
+                  Each run is executed as a Langflow trace, then logged with its response time, status, and any notable flags.
+                </p>
+              </Advanced>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageChange, showAgentColumn }) {
+function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageChange, showAgentColumn, selectedAgentId }) {
   const [statusFilter, setStatusFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const runs = metrics.runs;
+  useEffect(() => { setSelected(null); }, [selectedAgentId]);
   const filtered = useMemo(() => {
     let out = runs.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
     if (statusFilter === "Completed") out = out.filter((r) => r.status === "Completed");
@@ -992,7 +1024,7 @@ function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageCha
       <div className="syn-row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <h1 className="syn-h1">Work Done by Agent</h1>
-          <p className="syn-sub">Every financial news query the agent has handled. Click a row for details.</p>
+          <p className="syn-sub">Every request the agent has handled. Click a row for details.</p>
         </div>
         <button className="syn-btn" onClick={onRefresh} disabled={loading}>
           <Icon d={ICONS.refresh} size={14} />{loading ? "Refreshing…" : "Refresh"}
@@ -1073,10 +1105,21 @@ export default function SynapseDashboard() {
   const [agents, setAgents] = useState([]);
   const [selectedAgentId, setSelectedAgentId] = useState("all");
   const [modal, setModal] = useState(null); // 'issue' | 'workflow' | null
+  const loadRequestRef = useRef(0);
 
   const load = useCallback(async (pageNo = 1, agentId = "all") => {
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
     setLoading(true);
+    setTraceResult((previous) => ({
+      ...previous,
+      traces: [],
+      total: 0,
+      page: pageNo,
+      pages: 1,
+    }));
     const tr = await fetchTraces(pageNo, 20, agentId);
+    if (requestId !== loadRequestRef.current) return;
     setTraceResult(tr);
     setTracePage(tr.page || pageNo);
     setLoading(false);
@@ -1198,6 +1241,7 @@ export default function SynapseDashboard() {
                   pageInfo={{ page: tracePage, pages: traceResult.pages || 1, total: traceResult.total }}
                   onPageChange={(p) => load(p, selectedAgentId)}
                   showAgentColumn={selectedAgentId === "all"}
+                  selectedAgentId={selectedAgentId}
                 />
               )}
             </>
