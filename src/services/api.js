@@ -180,7 +180,50 @@ function buildUrl(path) {
   return `${API_BASE_URL}${trimmedPath}`;
 }
 
-export async function fetchTraces(page = 1, size = 20) {
+async function parseApiMessage(res) {
+  try {
+    const json = await res.json();
+    return json?.message || json?.detail?.message || json?.detail || `API responded with ${res.status}`;
+  } catch {
+    return `API responded with ${res.status}`;
+  }
+}
+
+export async function fetchAgents() {
+  if (!API_BASE_URL) return [];
+
+  try {
+    const res = await fetch(buildUrl("/api/agents"));
+    if (!res.ok) throw new Error(`API responded with ${res.status}`);
+    const json = await res.json();
+    return Array.isArray(json) ? json : [];
+  } catch (error) {
+    console.error("[synapse api] fetchAgents failed:", error);
+    return [];
+  }
+}
+
+export async function signup(email, password) {
+  const res = await fetch(buildUrl("/api/auth/signup"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw new Error(await parseApiMessage(res));
+  return res.json();
+}
+
+export async function signin(email, password) {
+  const res = await fetch(buildUrl("/api/auth/signin"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw new Error(await parseApiMessage(res));
+  return res.json();
+}
+
+export async function fetchTraces(page = 1, size = 20, agentId = "all") {
   if (!API_BASE_URL) {
     return {
       source: "reference",
@@ -192,7 +235,12 @@ export async function fetchTraces(page = 1, size = 20) {
   }
 
   try {
-    const url = buildUrl(`/api/traces?page=${page}&size=${size}`);
+    const params = new URLSearchParams({
+      page: String(page),
+      size: String(size),
+      agent_id: agentId || "all",
+    });
+    const url = buildUrl(`/api/traces?${params.toString()}`);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`API responded with ${res.status}`);
     const json = await res.json();
@@ -228,13 +276,14 @@ export async function fetchTraces(page = 1, size = 20) {
   }
 }
 
-export async function fetchTraceDetails(traceId, traces = []) {
+export async function fetchTraceDetails(traceId, traces = [], agentId = "all") {
   const existing = (traces || []).find((t) => t.id === traceId);
   if (existing) return existing;
   if (!API_BASE_URL) return null;
 
   try {
-    const res = await fetch(buildUrl(`/api/traces/${traceId}`));
+    const params = new URLSearchParams({ agent_id: agentId || "all" });
+    const res = await fetch(buildUrl(`/api/traces/${traceId}?${params.toString()}`));
     if (!res.ok) throw new Error(`API responded with ${res.status}`);
     const json = await res.json();
     return normalizeTrace(json);

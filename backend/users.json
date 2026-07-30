@@ -1,0 +1,11 @@
+{
+  "test2@nhtech.in": {
+    "password_hash": "$2b$12$k9STBK0WLIHm5xndRLFWHufeP9FFp2Mn0tAc.mtrPbB4b4kotdOxG"
+  },
+  "test3@nhtech.in": {
+    "password_hash": "$2b$12$X6aJ7O152R855kdnftsLc.kOneWxKYM3B6o18fPm6BCueANVti.nu"
+  },
+  "shivani.m@nighthack.in": {
+    "password_hash": "$2b$12$mM6jNNz40fqzcUjpbCpFhuTHGfvckyXZN/pjnDlD8PFffAjuCNjpe"
+  }
+}

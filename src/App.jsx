@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { fetchTraces } from "./services/api";
+import { fetchAgents, fetchTraces } from "./services/api";
 
 /* ============================================================================
    SYNAPSE — control plane for Hello Agent (manager-facing edition)
@@ -464,6 +464,8 @@ function parseTraceToAgentRun(trace) {
   const SOURCE_LABELS = { kb: "Knowledge base", visual_tool: "Drawing analysis", visual: "Drawing analysis" };
   return {
     id: trace.id,
+    agentId: trace.agentId || trace.agent_id,
+    agentLabel: trace.agentLabel || trace.agent_label || getAgentNameFromTrace(trace),
     startTime: trace.startTime,
     latencyMs: trace.totalLatencyMs || 0,
     tokens: trace.totalTokens || usage.total_tokens || 0,
@@ -727,7 +729,7 @@ function ExecutionDrawer({ run, onClose, isLive }) {
         </div>
         <div className="syn-drawer-body">
           <div className="syn-kv">
-            <div className="k">Handled by</div><div className="v">Financial News Intelligence Agent</div>
+            <div className="k">Handled by</div><div className="v">{run.agentLabel || run.agent || "Agent"}</div>
             <div className="k">Time taken</div><div className="v">{fmtFriendly(run.latencyMs)}{run.highLatency ? " (slower than usual)" : ""}</div>
             {run.confidence && (<><div className="k">Confidence</div><div className="v">{run.confidence}</div></>)}
             {run.source && (<><div className="k">Answer source</div><div className="v">{run.source}</div></>)}
@@ -798,23 +800,32 @@ function ExecutionDrawer({ run, onClose, isLive }) {
 
 /* ---------------------------------- pages --------------------------------- */
 
-function OverviewPage({ metrics, isLive, onOpenRequest }) {
+function OverviewPage({ metrics, onOpenRequest, selectedAgentId, agents }) {
   const m = metrics;
+  const isAllAgents = selectedAgentId === "all";
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId);
+  const selectedAgentLabel = selectedAgent?.label || "Selected agent";
+  const agentValue = isAllAgents ? `All agents (${agents.length})` : selectedAgentLabel;
+  const agentSub = isAllAgents ? "Combined view" : "Selected agent";
+  const connectorSub = isAllAgents ? "All configured connectors" : `${selectedAgentLabel} connector`;
+  const workflowSub = isAllAgents ? "All configured workflows" : `${selectedAgentLabel} workflow`;
+  const overviewSubheading = isAllAgents ? "Your agents at a glance." : `Your ${selectedAgentLabel} at a glance.`;
+  const howItWorksAgentText = isAllAgents ? "selected agent" : selectedAgentLabel;
   return (
     <div>
       <div className="syn-row syn-page-head" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <h1 className="syn-h1">Overview</h1>
-          <p className="syn-sub">Your Financial News Intelligence Agent at a glance.</p>
+          <p className="syn-sub">{overviewSubheading}</p>
         </div>
         <button className="syn-btn primary" onClick={onOpenRequest}>
           <Icon d={ICONS.plus} size={14} />Report Issue / Request Agent Change
         </button>
       </div>
       <div className="syn-metrics">
-        <Metric label="Agent" value="Financial News" sub="Financial News Intelligence Agent" />
-        <Metric label="Connector" value="Connected" tone="ok" sub="News and Portfolio Intelligence Source" />
-        <Metric label="Workflow" value="Active" tone="ok" sub="Financial News Intelligence" />
+        <Metric label="Agent" value={agentValue} sub={agentSub} />
+        <Metric label="Connector" value="Connected" tone="ok" sub={connectorSub} />
+        <Metric label="Workflow" value="Active" tone="ok" sub={workflowSub} />
         <Metric label="Requests handled" value={fmtNum(m.total)} tone="accent" sub={`${fmtNum(m.completedToday)} today`} />
         <Metric label="Successful responses" value={fmtNum(m.successful)} tone="ok" sub="Answered in chat" />
         <Metric label="Issues detected" value={fmtNum(m.failed)} tone={m.failed ? "err" : "ok"} sub={m.failed ? "See Work Done by Agent" : "No open issues in view"} />
@@ -822,7 +833,7 @@ function OverviewPage({ metrics, isLive, onOpenRequest }) {
       <div className="syn-card syn-overview-how">
         <div style={{ fontWeight: 650, fontSize: 14.5, marginBottom: 4 }}>How it works</div>
         <p style={{ margin: 0, fontSize: 13.5, color: "var(--ink-2)" }}>
-          Your team asks a market or portfolio news question. The <strong>Financial News Intelligence Agent</strong> reads it,
+          Your team asks a market or portfolio news question. The <strong>{howItWorksAgentText}</strong> reads it,
           checks current financial news and portfolio context, then returns a concise intelligence summary. Every request is recorded under{" "}
           <strong>Work Done by Agent</strong>.
         </p>
@@ -851,7 +862,10 @@ function OverviewPage({ metrics, isLive, onOpenRequest }) {
   );
 }
 
-function ConnectorPage({ onOpenRequest }) {
+function ConnectorPage({ onOpenRequest, selectedAgentId, agents }) {
+  const visibleAgents = selectedAgentId === "all"
+    ? agents
+    : agents.filter((agent) => agent.id === selectedAgentId);
   return (
     <div>
       <div>
@@ -859,36 +873,38 @@ function ConnectorPage({ onOpenRequest }) {
         <p className="syn-sub">The system your agent works with.</p>
       </div>
       <div className="syn-grid" style={{ gridTemplateColumns: "minmax(0, 560px)" }}>
-        <div className="syn-card">
-          <div className="syn-conn-head">
-            <div className="syn-conn-icon" style={{ background: "var(--cad-soft)", color: "var(--cad)" }}>FN</div>
-            <div style={{ minWidth: 0 }}>
-              <div className="syn-conn-name">News and Portfolio Intelligence Source</div>
-              <div className="syn-conn-type">Used by the Financial News Intelligence Agent</div>
+        {visibleAgents.map((agent) => (
+          <div className="syn-card" key={agent.id}>
+            <div className="syn-conn-head">
+              <div className="syn-conn-icon" style={{ background: "var(--cad-soft)", color: "var(--cad)" }}>FN</div>
+              <div style={{ minWidth: 0 }}>
+                <div className="syn-conn-name">{agent.label} connector</div>
+                <div className="syn-conn-type">Used by {agent.label}</div>
+              </div>
+              <span className="syn-chip chip-ok" style={{ marginLeft: "auto" }}><span className="syn-dot" />Connected</span>
             </div>
-            <span className="syn-chip chip-ok" style={{ marginLeft: "auto" }}><span className="syn-dot" />Connected</span>
+            <p style={{ margin: "0 0 10px", fontSize: 13, color: "var(--ink-2)" }}>
+              Pulls financial-news signals and portfolio context so the agent can answer market, company, and holdings-related questions.
+            </p>
+            <span className="syn-label">What it enables</span>
+            <ul style={{ margin: "7px 0 0", paddingLeft: 18, fontSize: 13, color: "var(--ink-2)", display: "flex", flexDirection: "column", gap: 4 }}>
+              <li>Read direct chat questions about markets and portfolios</li>
+              <li>Retrieve recent financial news and relevant context</li>
+              <li>Summarise key developments and likely portfolio impact</li>
+              <li>Highlight notable risks or items that need follow-up</li>
+            </ul>
+            <Advanced title="Advanced details">
+              <div className="syn-kv" style={{ gridTemplateColumns: "110px 1fr", marginTop: 8 }}>
+                <div className="k">Source</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>Financial news and portfolio context</div>
+                <div className="k">Called by</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>Langflow direct run</div>
+                <div className="k">Scope</div><div className="v" style={{ fontSize: 12 }}>Recent financial news, companies, markets, and portfolio relevance</div>
+              </div>
+              <div className="syn-note" style={{ marginTop: 10 }}>
+                Some live sources may take longer to respond during busy market-news periods. Slower runs show as latency, not necessarily failure.
+              </div>
+            </Advanced>
           </div>
-          <p style={{ margin: "0 0 10px", fontSize: 13, color: "var(--ink-2)" }}>
-            Pulls financial-news signals and portfolio context so the agent can answer market, company, and holdings-related questions.
-          </p>
-          <span className="syn-label">What it enables</span>
-          <ul style={{ margin: "7px 0 0", paddingLeft: 18, fontSize: 13, color: "var(--ink-2)", display: "flex", flexDirection: "column", gap: 4 }}>
-            <li>Read direct chat questions about markets and portfolios</li>
-            <li>Retrieve recent financial news and relevant context</li>
-            <li>Summarise key developments and likely portfolio impact</li>
-            <li>Highlight notable risks or items that need follow-up</li>
-          </ul>
-          <Advanced title="Advanced details">
-            <div className="syn-kv" style={{ gridTemplateColumns: "110px 1fr", marginTop: 8 }}>
-              <div className="k">Source</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>Financial news and portfolio context</div>
-              <div className="k">Called by</div><div className="v syn-mono" style={{ fontSize: 11.5 }}>Langflow direct run</div>
-              <div className="k">Scope</div><div className="v" style={{ fontSize: 12 }}>Recent financial news, companies, markets, and portfolio relevance</div>
-            </div>
-            <div className="syn-note" style={{ marginTop: 10 }}>
-              Some live sources may take longer to respond during busy market-news periods. Slower runs show as latency, not necessarily failure.
-            </div>
-          </Advanced>
-        </div>
+        ))}
       </div>
       <p style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 14 }}>
         Need the agent to work with another data source or portfolio system? Use{" "}
@@ -898,8 +914,11 @@ function ConnectorPage({ onOpenRequest }) {
   );
 }
 
-function WorkflowPage({ metrics, onOpenRequest }) {
+function WorkflowPage({ metrics, onOpenRequest, selectedAgentId, agents }) {
   const m = metrics;
+  const visibleAgents = selectedAgentId === "all"
+    ? agents
+    : agents.filter((agent) => agent.id === selectedAgentId);
   return (
     <div>
       <div className="syn-row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -912,44 +931,46 @@ function WorkflowPage({ metrics, onOpenRequest }) {
         </button>
       </div>
       <div className="syn-grid" style={{ gridTemplateColumns: "minmax(0, 640px)" }}>
-        <div className="syn-card">
-          <div className="syn-row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-            <div className="syn-conn-name">Financial News Intelligence</div>
-            <span className="syn-chip chip-ok"><span className="syn-dot" />Active</span>
-          </div>
-          <div className="syn-kv" style={{ gridTemplateColumns: "95px 1fr", marginBottom: 10 }}>
-            <div className="k">Agent</div><div className="v">Financial News Intelligence Agent</div>
-            <div className="k">Connector</div><div className="v">News and Portfolio Intelligence Source</div>
-            <div className="k">Trigger</div><div className="v">A team member asks a financial news or portfolio question in chat</div>
-            <div className="k">Output</div><div className="v">The agent returns a concise answer with relevant developments and context</div>
-          </div>
-          <span className="syn-label">Example requests</span>
-          <div className="syn-taglist" style={{ marginTop: 7 }}>
-            {["“Show me past 5 days news”", "“What changed for my portfolio?”", "“Summarise latest market news”", "“Which holdings need attention?”"].map((t) => (
-              <span key={t} className="syn-tag">{t}</span>
-            ))}
-          </div>
-          <Advanced title="Workflow statistics">
-            <div className="syn-kv" style={{ gridTemplateColumns: "170px 1fr", marginTop: 8 }}>
-              <div className="k">Requests handled (in view)</div><div className="v syn-mono">{fmtNum(m.total)}</div>
-              <div className="k">Successful responses</div><div className="v syn-mono">{fmtNum(m.successful)}</div>
-              <div className="k">Issues</div><div className="v syn-mono">{fmtNum(m.failed)}</div>
-              <div className="k">Items flagged</div><div className="v syn-mono">{fmtNum(m.discrepancies)}</div>
-              <div className="k">Average response time</div><div className="v syn-mono">{fmtMs(m.avgLatencyMs)}</div>
-              <div className="k">Slower runs (service idle)</div><div className="v syn-mono">{fmtNum(m.slowRuns)}</div>
-              <div className="k">Last run</div><div className="v syn-mono">{m.lastRun ? fmtTime(m.lastRun.startTime) : "—"}</div>
+        {visibleAgents.map((agent) => (
+          <div className="syn-card" key={agent.id}>
+            <div className="syn-row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+              <div className="syn-conn-name">{agent.label} workflow</div>
+              <span className="syn-chip chip-ok"><span className="syn-dot" />Active</span>
             </div>
-            <p style={{ fontSize: 12, color: "var(--muted)", margin: "10px 0 0" }}>
-              Each run is executed as a Langflow trace, then logged with its response time, status, and any notable flags.
-            </p>
-          </Advanced>
-        </div>
+            <div className="syn-kv" style={{ gridTemplateColumns: "95px 1fr", marginBottom: 10 }}>
+              <div className="k">Agent</div><div className="v">{agent.label}</div>
+              <div className="k">Connector</div><div className="v">{agent.label} connector</div>
+              <div className="k">Trigger</div><div className="v">A team member asks a financial news or portfolio question in chat</div>
+              <div className="k">Output</div><div className="v">The agent returns a concise answer with relevant developments and context</div>
+            </div>
+            <span className="syn-label">Example requests</span>
+            <div className="syn-taglist" style={{ marginTop: 7 }}>
+              {["“Show me past 5 days news”", "“What changed for my portfolio?”", "“Summarise latest market news”", "“Which holdings need attention?”"].map((t) => (
+                <span key={t} className="syn-tag">{t}</span>
+              ))}
+            </div>
+            <Advanced title="Workflow statistics">
+              <div className="syn-kv" style={{ gridTemplateColumns: "170px 1fr", marginTop: 8 }}>
+                <div className="k">Requests handled (in view)</div><div className="v syn-mono">{fmtNum(m.total)}</div>
+                <div className="k">Successful responses</div><div className="v syn-mono">{fmtNum(m.successful)}</div>
+                <div className="k">Issues</div><div className="v syn-mono">{fmtNum(m.failed)}</div>
+                <div className="k">Items flagged</div><div className="v syn-mono">{fmtNum(m.discrepancies)}</div>
+                <div className="k">Average response time</div><div className="v syn-mono">{fmtMs(m.avgLatencyMs)}</div>
+                <div className="k">Slower runs (service idle)</div><div className="v syn-mono">{fmtNum(m.slowRuns)}</div>
+                <div className="k">Last run</div><div className="v syn-mono">{m.lastRun ? fmtTime(m.lastRun.startTime) : "—"}</div>
+              </div>
+              <p style={{ fontSize: 12, color: "var(--muted)", margin: "10px 0 0" }}>
+                Each run is executed as a Langflow trace, then logged with its response time, status, and any notable flags.
+              </p>
+            </Advanced>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageChange }) {
+function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageChange, showAgentColumn }) {
   const [statusFilter, setStatusFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
@@ -993,12 +1014,12 @@ function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageCha
           <table className="syn-table">
             <thead>
               <tr>
-                <th>Time</th><th>Query</th><th>Status</th><th>Issue Flagged</th>
+                <th>Time</th>{showAgentColumn && <th>Agent</th>}<th>Query</th><th>Status</th><th>Issue Flagged</th>
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 && (
-                <tr><td colSpan={4} style={{ textAlign: "center", padding: 28, color: "var(--muted)", cursor: "default" }}>
+                <tr><td colSpan={showAgentColumn ? 5 : 4} style={{ textAlign: "center", padding: 28, color: "var(--muted)", cursor: "default" }}>
                   Nothing matches this view. Clear the search or choose "All".
                 </td></tr>
               )}
@@ -1006,6 +1027,7 @@ function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageCha
                 <tr key={r.id} onClick={() => setSelected(r)} tabIndex={0}
                   onKeyDown={(e) => { if (e.key === "Enter") setSelected(r); }}>
                   <td style={{ whiteSpace: "nowrap" }}>{fmtTime(r.startTime)}</td>
+                  {showAgentColumn && <td style={{ whiteSpace: "nowrap" }}>{r.agentLabel || "—"}</td>}
                   <td className="td-ellip" title={r.query}>{r.query}</td>
                   <td><StatusChip status={r.status} /></td>
                   <td><FlagChip flagged={r.discrepancyFlagged} /></td>
@@ -1048,20 +1070,41 @@ export default function SynapseDashboard() {
   const [loading, setLoading] = useState(true);
   const [traceResult, setTraceResult] = useState({ source: "reference", traces: [] });
   const [tracePage, setTracePage] = useState(1);
+  const [agents, setAgents] = useState([]);
+  const [selectedAgentId, setSelectedAgentId] = useState("all");
   const [modal, setModal] = useState(null); // 'issue' | 'workflow' | null
 
-  const load = useCallback(async (pageNo = 1) => {
+  const load = useCallback(async (pageNo = 1, agentId = "all") => {
     setLoading(true);
-    const tr = await fetchTraces(pageNo, 20);
+    const tr = await fetchTraces(pageNo, 20, agentId);
     setTraceResult(tr);
     setTracePage(tr.page || pageNo);
     setLoading(false);
   }, []);
-  useEffect(() => { load(1); }, [load]);
+  useEffect(() => {
+    let active = true;
+    fetchAgents().then((items) => {
+      if (active) setAgents(items);
+    });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => { load(1, selectedAgentId); }, [load, selectedAgentId]);
+
+  const onAgentChange = (event) => {
+    const nextAgentId = event.target.value || "all";
+    setSelectedAgentId(nextAgentId);
+    setTracePage(1);
+  };
 
   const isLive = traceResult.source === "live";
   const metrics = useMemo(() => calculateDashboardMetrics(traceResult.traces || []), [traceResult]);
   const active = NAV.find((n) => n.id === page);
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId);
+  const selectedAgentLabel = selectedAgent?.label || "Selected agent";
+  const sidebarSubtitle = selectedAgentId === "all" ? "Multi-agent dashboard" : selectedAgentLabel;
+  const workflowRequestIntro = selectedAgentId === "all"
+    ? "Describe how one of these workflows should change or what it should also handle."
+    : `Describe how the ${selectedAgentLabel} workflow should change or what it should also handle.`;
 
   return (
     <div className={`syn-root ${dark ? "dark" : ""}`}>
@@ -1075,7 +1118,7 @@ export default function SynapseDashboard() {
           </div>
           <div>
             <div className="syn-logo-name">Synapse</div>
-            <div className="syn-logo-sub">Financial News Intelligence Agent</div>
+            <div className="syn-logo-sub">{sidebarSubtitle}</div>
           </div>
         </div>
         <div className="syn-navsec">Menu</div>
@@ -1099,6 +1142,12 @@ export default function SynapseDashboard() {
           <span className="syn-top-title">{active ? active.label : ""}</span>
           <div className="syn-top-right">
             <EnvBadge env={isLive ? "live" : "reference"} />
+            <select className="syn-btn" value={selectedAgentId} onChange={onAgentChange} aria-label="Select agent">
+              <option value="all">All agents</option>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>{agent.label}</option>
+              ))}
+            </select>
             <button className="syn-btn" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
               <Icon d={dark ? ICONS.sun : ICONS.moon} size={15} />
             </button>
@@ -1109,7 +1158,7 @@ export default function SynapseDashboard() {
             <div className="syn-banner">
               <span className="syn-chip chip-demo" style={{ flexShrink: 0 }}><span className="syn-dot" />Reference Data</span>
               <span style={{ color: "var(--ink-2)" }}>
-                Showing reference data from documented Financial News Intelligence Agent runs. Live connection can be added through a secure backend proxy.
+                Showing reference data from documented agent runs. Live connection can be added through a secure backend proxy.
               </span>
             </div>
           )}
@@ -1117,17 +1166,38 @@ export default function SynapseDashboard() {
             <p style={{ color: "var(--muted)" }}>Loading…</p>
           ) : (
             <>
-              {page === "overview" && <OverviewPage metrics={metrics} isLive={isLive} onOpenRequest={() => setModal("issue")} />}
-              {page === "connector" && <ConnectorPage onOpenRequest={() => setModal("issue")} />}
-              {page === "workflow" && <WorkflowPage metrics={metrics} onOpenRequest={() => setModal("workflow")} />}
+              {page === "overview" && (
+                <OverviewPage
+                  metrics={metrics}
+                  onOpenRequest={() => setModal("issue")}
+                  selectedAgentId={selectedAgentId}
+                  agents={agents}
+                />
+              )}
+              {page === "connector" && (
+                <ConnectorPage
+                  onOpenRequest={() => setModal("issue")}
+                  selectedAgentId={selectedAgentId}
+                  agents={agents}
+                />
+              )}
+              {page === "workflow" && (
+                <WorkflowPage
+                  metrics={metrics}
+                  onOpenRequest={() => setModal("workflow")}
+                  selectedAgentId={selectedAgentId}
+                  agents={agents}
+                />
+              )}
               {page === "work" && (
                 <WorkDonePage
                   metrics={metrics}
                   isLive={isLive}
-                  onRefresh={() => load(tracePage)}
+                  onRefresh={() => load(tracePage, selectedAgentId)}
                   loading={loading}
                   pageInfo={{ page: tracePage, pages: traceResult.pages || 1, total: traceResult.total }}
-                  onPageChange={(p) => load(p)}
+                  onPageChange={(p) => load(p, selectedAgentId)}
+                  showAgentColumn={selectedAgentId === "all"}
                 />
               )}
             </>
@@ -1154,7 +1224,7 @@ export default function SynapseDashboard() {
         <RequestModal
           kind="workflow_change"
           title="Request Workflow Change"
-          intro="Describe how the Financial News Intelligence workflow should change or what it should also handle."
+          intro={workflowRequestIntro}
           onClose={() => setModal(null)}
           fields={[
             { id: "change", label: "Change requested", type: "textarea", placeholder: "e.g. Also answer questions about sector exposure", required: true },
