@@ -15,6 +15,7 @@ import { fetchAgents, fetchTraces } from "./services/api";
 /* ----------------------------- configuration ----------------------------- */
 
 const CONFIG = {
+  PROXY_BASE: (import.meta.env.VITE_API_BASE_URL || "").replace(/\/+$/, ""),
   FLOW_ID: "50ef3478-588d-493b-b8df-2c1676d6f09f", // shown only inside technical sections
   // Display-only references for Advanced details sections:
   LANGFLOW_BASE: "https://agent-builder.nhtech.link",
@@ -177,6 +178,11 @@ const STYLES = `
 .chip-cad { background: var(--cad-soft); color: var(--cad); }
 .chip-demo { background: var(--demo-soft); color: var(--demo); }
 .chip-neutral { background: var(--surface-2); color: var(--ink-2); border:1px solid var(--line); }
+.syn-login-message {
+  border-radius: 9px; padding: 9px 11px; font-size: 12.5px; margin-bottom: 13px;
+  border: 1px solid var(--line);
+}
+.syn-login-message.err { background: var(--err-soft); color: var(--err); border-color: var(--err-soft); }
 
 /* metric cards */
 .syn-metrics { display:grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 14px; align-items: stretch; }
@@ -356,13 +362,29 @@ details.syn-details > .syn-details-body { padding: 4px 13px 13px; border-top:1px
 }
 `;
 
-/* Simulated request submission (Report Issue / Request Agent / Connector /
-   Workflow). No real email or API is wired yet — requests are acknowledged
-   in the UI and logged to the console for the demo. */
-async function submitRequest(kind, fields) {
-  await new Promise((r) => setTimeout(r, 700));
-  try { console.info("[synapse] request submitted:", kind, fields); } catch (e) {}
-  return { ok: true };
+async function submitRequest(kind, fields, agentId = "all") {
+  const res = await fetch(`${CONFIG.PROXY_BASE}/api/requests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind,
+      fields,
+      agent_id: agentId || "all",
+    }),
+  });
+
+  if (!res.ok) {
+    let message = "Failed to send request";
+    try {
+      const json = await res.json();
+      message = json?.detail || json?.message || message;
+    } catch {
+      message = `Failed to send request (${res.status})`;
+    }
+    throw new Error(message);
+  }
+
+  return res.json();
 }
 
 /* ------------------------------ trace parsing ----------------------------- */
@@ -389,7 +411,7 @@ function getBlocks(trace) {
   try {
     const cbs = trace.output.message.data.content_blocks || [];
     return cbs.flatMap((b) => b.contents || []);
-  } catch (e) { return []; }
+  } catch { return []; }
 }
 
 function getWorkflowFromTrace(trace) {
@@ -646,16 +668,13 @@ function Pipeline({ nodes }) {
 }
 
 /* ------------------------------ request modal ------------------------------ */
-/* One reusable modal for all request forms. Submission is simulated — no
-   real email or API call is made yet. */
-
-function RequestModal({ title, intro, fields, submitLabel = "Submit request", successNote, onClose, kind }) {
-  const [values, setValues] = useState(() => {
+function RequestModal({ title, intro, fields, submitLabel = "Submit request", successNote, onClose, kind, agentId, agents = [] }) {  const [values, setValues] = useState(() => {
     const v = {};
     fields.forEach((f) => { v[f.id] = f.default || ""; });
     return v;
   });
   const [state, setState] = useState("form"); // form | sending | done
+  const [error, setError] = useState("");
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -664,9 +683,15 @@ function RequestModal({ title, intro, fields, submitLabel = "Submit request", su
   const missing = fields.filter((f) => f.required && !String(values[f.id]).trim());
   const submit = async () => {
     if (missing.length) return;
+    setError("");
     setState("sending");
-    await submitRequest(kind, values);
-    setState("done");
+    try {
+      await submitRequest(kind, values, agentId);
+      setState("done");
+    } catch (err) {
+      setError(err.message || "Failed to send request");
+      setState("form");
+    }
   };
   return (
     <div className="syn-modal" role="dialog" aria-modal="true" aria-label={title}>
@@ -681,6 +706,7 @@ function RequestModal({ title, intro, fields, submitLabel = "Submit request", su
               </button>
             </div>
             {intro && <p style={{ margin: "0 0 14px", fontSize: 13, color: "var(--muted)" }}>{intro}</p>}
+            {error && <div className="syn-login-message err">{error}</div>}
             {fields.map((f) => (
               <div className="syn-field" key={f.id}>
                 <label htmlFor={`fld-${f.id}`}>{f.label}{f.required ? " *" : ""}</label>
@@ -1149,6 +1175,11 @@ export default function SynapseDashboard() {
     ? "Describe how one of these workflows should change or what it should also handle."
     : `Describe how the ${selectedAgentLabel} workflow should change or what it should also handle.`;
 
+  const targetAgentOptions = ["General / not agent-specific", ...agents.map((a) => a.label)];
+  const targetAgentDefault = selectedAgentId !== "all" && selectedAgent
+    ? selectedAgent.label
+    : "General / not agent-specific";
+
   return (
     <div className={`syn-root ${dark ? "dark" : ""}`}>
       <style>{STYLES}</style>
@@ -1255,7 +1286,10 @@ export default function SynapseDashboard() {
           title="Report Issue / Request Agent Change"
           intro="Tell us what's wrong or what you'd like changed. No technical detail needed."
           onClose={() => setModal(null)}
+          agentId={selectedAgentId}
+          agents={agents}
           fields={[
+            { id: "target_agent", label: "Which agent is this about?", type: "select", options: targetAgentOptions, default: targetAgentDefault, required: true },
             { id: "type", label: "Request type", type: "select", options: ["Report issue", "Request agent change"], default: "Report issue", required: true },
             { id: "description", label: "Description", type: "textarea", placeholder: "What happened, or what should change?", required: true },
             { id: "priority", label: "Priority", type: "select", options: ["Low", "Medium", "High"], default: "Medium", required: true },
@@ -1270,7 +1304,10 @@ export default function SynapseDashboard() {
           title="Request Workflow Change"
           intro={workflowRequestIntro}
           onClose={() => setModal(null)}
+          agentId={selectedAgentId}
+          agents={agents}
           fields={[
+            { id: "target_agent", label: "Which agent is this about?", type: "select", options: targetAgentOptions, default: targetAgentDefault, required: true },
             { id: "change", label: "Change requested", type: "textarea", placeholder: "e.g. Also answer questions about sector exposure", required: true },
             { id: "why", label: "Why is this needed?", type: "textarea", required: true },
             { id: "example", label: "Example query / request", type: "textarea", placeholder: "An example of the kind of question the agent should handle" },

@@ -14,24 +14,34 @@ own `flowId` field itself, then paginates the filtered result.
 import math
 import os
 import re
-from typing import Optional
+from datetime import datetime, timezone
+from html import escape
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 try:
     from auth import router as auth_router
 except ImportError:
     from backend.auth import router as auth_router
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
 LANGFLOW_API_KEY = os.getenv("LANGFLOW_API_KEY", "")
 LANGFLOW_BASE = os.getenv("LANGFLOW_BASE", "https://agent-builder.nhtech.link")
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173")
 FRONTEND_DOMAIN = os.getenv("FRONTEND_DOMAIN", "")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "")
+TEST_TO_EMAIL = os.getenv("TEST_TO_EMAIL", "")
+CC_EMAIL_1 = os.getenv("CC_EMAIL_1", "")
+CC_EMAIL_2 = os.getenv("CC_EMAIL_2", "")
 
 AGENTS = []
 for key in os.environ:
@@ -66,6 +76,26 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+
+
+class RequestSubmission(BaseModel):
+    kind: Literal["issue_or_change", "workflow_change"]
+    fields: dict[str, Any]
+    agent_id: str = "all"
+
+
+REQUEST_FIELD_LABELS = {
+    "type": "Request type",
+    "target_agent": "Agent this is about",
+    "description": "Description",
+    "priority": "Priority",
+    "name": "Name",
+    "email": "Email",
+    "change": "Change requested",
+    "why": "Why is this needed?",
+    "example": "Example query / request",
+    "output": "Expected output",
+}
 
 
 def _langflow_headers(api_key: str):
@@ -169,6 +199,69 @@ def _find_agent(agent_id: str):
     return next((agent for agent in AGENTS if agent["id"] == agent_id), None)
 
 
+def _agent_label(agent_id: str):
+    if agent_id == "all":
+        return "All agents"
+    agent = _find_agent(agent_id)
+    if agent:
+        return agent["label"]
+    return agent_id.replace("_", " ").replace("-", " ").title()
+
+
+def _request_kind_label(kind: str):
+    if kind == "workflow_change":
+        return "Workflow Change Request"
+    return "Report Issue"
+
+
+def _field_label(key: str):
+    if key in REQUEST_FIELD_LABELS:
+        return REQUEST_FIELD_LABELS[key]
+    return key.replace("_", " ").strip().capitalize()
+
+
+def _format_field_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return escape(str(value))
+    return escape(str(value))
+
+
+def _build_request_html(kind: str, fields: dict, agent_label: str):
+    timestamp = datetime.now(timezone.utc).isoformat()
+    rows = [
+        ("Agent", agent_label),
+        ("Timestamp", timestamp),
+    ]
+    rows.extend((_field_label(key), value) for key, value in fields.items())
+
+    requester_parts = [
+        str(fields.get("name", "")).strip(),
+        str(fields.get("email", "")).strip(),
+    ]
+    requested_by = " ".join(part for part in requester_parts if part)
+    if requested_by:
+        rows.append(("Requested by", requested_by))
+
+    row_html = "".join(
+        "<tr>"
+        f"<th style=\"text-align:left;padding:8px 12px;border-bottom:1px solid #dfe6ee;color:#43536a;vertical-align:top;\">{escape(label)}</th>"
+        f"<td style=\"padding:8px 12px;border-bottom:1px solid #dfe6ee;color:#101b2c;white-space:pre-wrap;\">{_format_field_value(value)}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+
+    return (
+        "<div style=\"font-family:Inter,Segoe UI,Arial,sans-serif;color:#101b2c;line-height:1.5;\">"
+        f"<h2 style=\"margin:0 0 12px;\">{escape(_request_kind_label(kind))}</h2>"
+        "<table style=\"border-collapse:collapse;width:100%;max-width:720px;border:1px solid #dfe6ee;\">"
+        f"{row_html}"
+        "</table>"
+        "</div>"
+    )
+
+
 def _tag_trace(trace, agent):
     tagged = dict(trace)
     tagged["agentId"] = agent["id"]
@@ -190,6 +283,62 @@ def health():
 @app.get("/api/agents")
 def get_agents():
     return [_agent_public(agent) for agent in AGENTS]
+
+
+@app.post("/api/requests")
+def create_request(payload: RequestSubmission):
+    if not RESEND_API_KEY or not FROM_EMAIL:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "message": "Failed to send request",
+                "detail": "RESEND_API_KEY and FROM_EMAIL must be configured",
+            },
+        )
+
+    recipient = TEST_TO_EMAIL or str(payload.fields.get("email", "")).strip()
+    if not recipient:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "message": "Failed to send request",
+                "detail": "No recipient email provided",
+            },
+        )
+
+    agent_label = _agent_label(payload.agent_id)
+    resend_payload = {
+        "from": FROM_EMAIL,
+        "to": [recipient],
+        "subject": f"[Synapse] {_request_kind_label(payload.kind)} — {agent_label}",
+        "html": _build_request_html(payload.kind, payload.fields, agent_label),
+    }
+    cc_list = [email for email in [CC_EMAIL_1, CC_EMAIL_2] if email]
+    if cc_list:
+        resend_payload["cc"] = cc_list
+    try:
+        res = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=resend_payload,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"message": "Failed to send request", "detail": str(exc)},
+        )
+
+    if not res.ok:
+        return JSONResponse(
+            status_code=500,
+            content={"message": "Failed to send request", "detail": res.text},
+        )
+
+    return {"message": "Request sent"}
 
 
 @app.get("/api/traces")
