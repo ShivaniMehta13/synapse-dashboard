@@ -132,27 +132,31 @@ def _trace_uses_agent_tool(trace, tool_name: str):
     if not tool_name:
         return True
 
-    content_blocks = (
-        trace.get("output", {})
-        .get("message", {})
-        .get("data", {})
-        .get("content_blocks", [])
-    )
-    if not isinstance(content_blocks, list):
-        return False
+    try:
+        output = trace.get("output") or {}
+        message = output.get("message") or {}
+        data = message.get("data") or {}
+        content_blocks = data.get("content_blocks") or []
 
-    for block in content_blocks:
-        contents = block.get("contents", []) if isinstance(block, dict) else []
-        if not isinstance(contents, list):
-            continue
-        for item in contents:
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "tool_use"
-                and item.get("name") == tool_name
-            ):
-                return True
-    return False
+        if not isinstance(content_blocks, list):
+            return False
+
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            contents = block.get("contents") or []
+            if not isinstance(contents, list):
+                continue
+            for item in contents:
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "tool_use"
+                    and item.get("name") == tool_name
+                ):
+                    return True
+        return False
+    except Exception:
+        return False
 
 
 def _fetch_all_traces_for_flow(flow_id: str, api_key: str, tool_name: str):

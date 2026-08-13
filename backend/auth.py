@@ -1,7 +1,9 @@
 import json
+import secrets
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, Header
 from fastapi.responses import JSONResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel
@@ -9,6 +11,9 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/api/auth")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 USERS_FILE = Path(__file__).with_name("users.json")
+
+# In-memory session store mapping token -> email
+SESSIONS: dict[str, str] = {}
 
 
 class AuthRequest(BaseModel):
@@ -59,4 +64,31 @@ def signin(payload: AuthRequest):
     user = users.get(email)
     if not user or not pwd_context.verify(payload.password, user.get("password_hash", "")):
         return JSONResponse(status_code=401, content={"message": "Invalid email or password"})
-    return {"message": "Signed in"}
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = email
+    return {"message": "Signed in", "token": token}
+
+
+def get_current_user(authorization_header: Optional[str]) -> Optional[str]:
+    """Return the email associated with the provided Authorization header token."""
+    if not authorization_header:
+        return None
+    parts = authorization_header.split()
+    token = parts[-1] if parts else None
+    if not token:
+        return None
+    return SESSIONS.get(token)
+
+
+@router.post("/logout")
+def logout(authorization: Optional[str] = Header(None)):
+    """Remove the session token if present. Idempotent."""
+    if authorization:
+        parts = authorization.split()
+        token = parts[-1] if parts else None
+        if token and token in SESSIONS:
+            try:
+                del SESSIONS[token]
+            except KeyError:
+                pass
+    return {"message": "Logged out"}

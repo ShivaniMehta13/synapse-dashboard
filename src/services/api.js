@@ -189,11 +189,21 @@ async function parseApiMessage(res) {
   }
 }
 
+function _authHeaders() {
+  try {
+    const token = localStorage.getItem("synapse_token");
+    if (token) return { Authorization: `Bearer ${token}` };
+  } catch (e) {
+    // ignore
+  }
+  return {};
+}
+
 export async function fetchAgents() {
   if (!API_BASE_URL) return [];
 
   try {
-    const res = await fetch(buildUrl("/api/agents"));
+    const res = await fetch(buildUrl("/api/agents"), { headers: _authHeaders() });
     if (!res.ok) throw new Error(`API responded with ${res.status}`);
     const json = await res.json();
     return Array.isArray(json) ? json : [];
@@ -220,7 +230,24 @@ export async function signin(email, password) {
     body: JSON.stringify({ email, password }),
   });
   if (!res.ok) throw new Error(await parseApiMessage(res));
-  return res.json();
+  const json = await res.json();
+  try {
+    if (json?.token) localStorage.setItem("synapse_token", json.token);
+  } catch (e) {}
+  return json;
+}
+
+export async function logout() {
+  try {
+    const token = localStorage.getItem("synapse_token");
+    await fetch(buildUrl("/api/auth/logout"), {
+      method: "POST",
+      headers: { ..._authHeaders(), "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    // ignore network errors
+  }
+  try { localStorage.removeItem("synapse_token"); } catch (e) {}
 }
 
 export async function fetchTraces(page = 1, size = 20, agentId = "all") {
@@ -241,7 +268,7 @@ export async function fetchTraces(page = 1, size = 20, agentId = "all") {
       agent_id: agentId || "all",
     });
     const url = buildUrl(`/api/traces?${params.toString()}`);
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: _authHeaders() });
     if (!res.ok) throw new Error(`API responded with ${res.status}`);
     const json = await res.json();
     if (json?.source !== "live") {
@@ -283,7 +310,7 @@ export async function fetchTraceDetails(traceId, traces = [], agentId = "all") {
 
   try {
     const params = new URLSearchParams({ agent_id: agentId || "all" });
-    const res = await fetch(buildUrl(`/api/traces/${traceId}?${params.toString()}`));
+    const res = await fetch(buildUrl(`/api/traces/${traceId}?${params.toString()}`), { headers: _authHeaders() });
     if (!res.ok) throw new Error(`API responded with ${res.status}`);
     const json = await res.json();
     return normalizeTrace(json);

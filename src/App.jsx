@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { fetchAgents, fetchTraces } from "./services/api";
+import { fetchAgents, fetchTraces, logout as apiLogout } from "./services/api";
 
 /* ============================================================================
    SYNAPSE — control plane for Hello Agent (manager-facing edition)
@@ -363,9 +363,15 @@ details.syn-details > .syn-details-body { padding: 4px 13px 13px; border-top:1px
 `;
 
 async function submitRequest(kind, fields, agentId = "all") {
+  const headers = { "Content-Type": "application/json" };
+  try {
+    const token = localStorage.getItem("synapse_token");
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch (e) {}
+
   const res = await fetch(`${CONFIG.PROXY_BASE}/api/requests`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({
       kind,
       fields,
@@ -1121,7 +1127,7 @@ const NAV = [
   { id: "work", label: "Work Done by Agent", icon: "work" },
 ];
 
-export default function SynapseDashboard() {
+export default function SynapseDashboard({ onLogout }) {
   const [dark, setDark] = useState(false);
   const [page, setPage] = useState("overview");
   const [sideOpen, setSideOpen] = useState(false);
@@ -1224,6 +1230,9 @@ export default function SynapseDashboard() {
             </select>
             <button className="syn-btn" onClick={() => setDark((d) => !d)} aria-label="Toggle theme">
               <Icon d={dark ? ICONS.sun : ICONS.moon} size={15} />
+            </button>
+            <button className="syn-btn" onClick={async () => { try { await apiLogout(); } catch (e) {} if (onLogout) onLogout(); }} aria-label="Logout">
+              Logout
             </button>
           </div>
         </header>
