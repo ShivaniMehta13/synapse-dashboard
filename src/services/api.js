@@ -199,11 +199,15 @@ function _authHeaders() {
   return {};
 }
 
-export async function fetchAgents() {
+export async function fetchAgents(email = "") {
   if (!API_BASE_URL) return [];
 
   try {
-    const res = await fetch(buildUrl("/api/agents"), { headers: _authHeaders() });
+    const params = new URLSearchParams();
+    if (email) params.set("email", email);
+    const query = params.toString();
+    const url = query ? buildUrl(`/api/agents?${query}`) : buildUrl("/api/agents");
+    const res = await fetch(url, { headers: _authHeaders() });
     if (!res.ok) throw new Error(`API responded with ${res.status}`);
     const json = await res.json();
     return Array.isArray(json) ? json : [];
@@ -213,28 +217,22 @@ export async function fetchAgents() {
   }
 }
 
-export async function signup(email, password) {
-  const res = await fetch(buildUrl("/api/auth/signup"), {
+export async function login(email) {
+  const res = await fetch(buildUrl("/api/auth/login"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email }),
   });
   if (!res.ok) throw new Error(await parseApiMessage(res));
   return res.json();
 }
 
 export async function signin(email, password) {
-  const res = await fetch(buildUrl("/api/auth/signin"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
-  if (!res.ok) throw new Error(await parseApiMessage(res));
-  const json = await res.json();
-  try {
-    if (json?.token) localStorage.setItem("synapse_token", json.token);
-  } catch (e) {}
-  return json;
+  return login(email);
+}
+
+export async function signup(email, password) {
+  return login(email);
 }
 
 export async function logout() {
@@ -250,7 +248,7 @@ export async function logout() {
   try { localStorage.removeItem("synapse_token"); } catch (e) {}
 }
 
-export async function fetchTraces(page = 1, size = 20, agentId = "all") {
+export async function fetchTraces(page = 1, size = 20, agentId = "all", email = "") {
   if (!API_BASE_URL) {
     return {
       source: "reference",
@@ -267,6 +265,7 @@ export async function fetchTraces(page = 1, size = 20, agentId = "all") {
       size: String(size),
       agent_id: agentId || "all",
     });
+    if (email) params.set("email", email);
     const url = buildUrl(`/api/traces?${params.toString()}`);
     const res = await fetch(url, { headers: _authHeaders() });
     if (!res.ok) throw new Error(`API responded with ${res.status}`);

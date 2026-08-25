@@ -6,7 +6,17 @@ import LoginPage from './LoginPage.jsx'
 
 export function Root() {
   const [loggedIn, setLoggedIn] = useState(false)
-  return loggedIn ? <App onLogout={() => setLoggedIn(false)} /> : <LoginPage onLoginSuccess={() => setLoggedIn(true)} />
+  const [loggedInEmail, setLoggedInEmail] = useState('')
+
+  return loggedIn
+    ? <App onLogout={() => {
+        setLoggedIn(false)
+        setLoggedInEmail('')
+      }} loggedInEmail={loggedInEmail} />
+    : <LoginPage onLoginSuccess={(email) => {
+        setLoggedInEmail(email)
+        setLoggedIn(true)
+      }} />
 }
 
 createRoot(document.getElementById('root')).render(

@@ -33,4 +33,9 @@ netlify/functions/.env
 # Python
 __pycache__/
 *.pyc
-backend/__pycache__/backend/venv/
+backend/__pycache__/
+backend/venv/
+
+# Private keys / secrets
+backend/keys/
+*.pem

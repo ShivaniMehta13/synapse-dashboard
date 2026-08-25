@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { signin, signup } from "./services/api";
+import { login } from "./services/api";
 
 const LOGIN_STYLES = `
 .syn-login {
@@ -81,42 +81,29 @@ const LOGIN_STYLES = `
 `;
 
 export default function LoginPage({ onLoginSuccess }) {
-  const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState(null);
   const [loading, setLoading] = useState(false);
-
-  const switchMode = (nextMode) => {
-    setMode(nextMode);
-    setMessage(null);
-    setPassword("");
-    setConfirmPassword("");
-  };
 
   const onSubmit = async (event) => {
     event.preventDefault();
     setMessage(null);
 
-    if (mode === "signup" && password !== confirmPassword) {
-      setMessage({ type: "err", text: "Passwords do not match" });
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setMessage({ type: "err", text: "Please enter your email." });
       return;
     }
 
     setLoading(true);
     try {
-      if (mode === "signup") {
-        await signup(email, password);
-        setMessage({ type: "ok", text: "User created. You can now sign in." });
-        setPassword("");
-        setConfirmPassword("");
-      } else {
-        await signin(email, password);
-        onLoginSuccess();
-      }
+      await login(trimmedEmail);
+      onLoginSuccess(trimmedEmail);
     } catch (error) {
-      setMessage({ type: "err", text: error.message || (mode === "signin" ? "Invalid email or password" : "Could not create user") });
+      setMessage({
+        type: "err",
+        text: error.message || "We couldn't find any agents for this email — check with your team.",
+      });
     } finally {
       setLoading(false);
     }
@@ -138,29 +125,15 @@ export default function LoginPage({ onLoginSuccess }) {
           </div>
         </div>
 
-        <div className="syn-login-tabs" role="tablist" aria-label="Authentication mode">
-          <button type="button" className={mode === "signin" ? "active" : ""} onClick={() => switchMode("signin")}>Sign in</button>
-          <button type="button" className={mode === "signup" ? "active" : ""} onClick={() => switchMode("signup")}>Create account</button>
-        </div>
-
         {message && <div className={`syn-login-message ${message.type}`}>{message.text}</div>}
 
         <div className="syn-login-field">
           <label htmlFor="login-email">Email</label>
           <input id="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />
         </div>
-        <div className="syn-login-field">
-          <label htmlFor="login-password">Password</label>
-          <input id="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required autoComplete={mode === "signin" ? "current-password" : "new-password"} />
-        </div>
-        {mode === "signup" && (
-          <div className="syn-login-field">
-            <label htmlFor="login-confirm-password">Confirm password</label>
-            <input id="login-confirm-password" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required autoComplete="new-password" />
-          </div>
-        )}
+
         <button className="syn-login-btn" type="submit" disabled={loading}>
-          {loading ? "Please wait..." : mode === "signin" ? "Sign in" : "Create account"}
+          {loading ? "Please wait..." : "Continue"}
         </button>
       </form>
     </div>

@@ -1127,7 +1127,7 @@ const NAV = [
   { id: "work", label: "Work Done by Agent", icon: "work" },
 ];
 
-export default function SynapseDashboard({ onLogout }) {
+export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
   const [dark, setDark] = useState(false);
   const [page, setPage] = useState("overview");
   const [sideOpen, setSideOpen] = useState(false);
@@ -1150,19 +1150,19 @@ export default function SynapseDashboard({ onLogout }) {
       page: pageNo,
       pages: 1,
     }));
-    const tr = await fetchTraces(pageNo, 20, agentId);
+    const tr = await fetchTraces(pageNo, 20, agentId, loggedInEmail);
     if (requestId !== loadRequestRef.current) return;
     setTraceResult(tr);
     setTracePage(tr.page || pageNo);
     setLoading(false);
-  }, []);
+  }, [loggedInEmail]);
   useEffect(() => {
     let active = true;
-    fetchAgents().then((items) => {
+    fetchAgents(loggedInEmail).then((items) => {
       if (active) setAgents(items);
     });
     return () => { active = false; };
-  }, []);
+  }, [loggedInEmail]);
   useEffect(() => { load(1, selectedAgentId); }, [load, selectedAgentId]);
 
   const onAgentChange = (event) => {

@@ -1,6 +1,6 @@
-bcrypt<4
+cryptography
 fastapi
-passlib[bcrypt]
+PyJWT
 python-dotenv
 requests
 uvicorn[standard]

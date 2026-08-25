@@ -14,16 +14,19 @@ own `flowId` field itself, then paginates the filtered result.
 import math
 import os
 import re
+import time
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+import jwt
 import requests
+from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 try:
@@ -35,6 +38,7 @@ load_dotenv(Path(__file__).with_name(".env"))
 
 LANGFLOW_API_KEY = os.getenv("LANGFLOW_API_KEY", "")
 LANGFLOW_BASE = os.getenv("LANGFLOW_BASE", "https://agent-builder.nhtech.link")
+PLATFORM_BASE = os.getenv("PLATFORM_BASE", "https://ottom8.nhtech.link")
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "http://localhost:5173")
 FRONTEND_DOMAIN = os.getenv("FRONTEND_DOMAIN", "")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
@@ -42,6 +46,15 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", "")
 TEST_TO_EMAIL = os.getenv("TEST_TO_EMAIL", "")
 CC_EMAIL_1 = os.getenv("CC_EMAIL_1", "")
 CC_EMAIL_2 = os.getenv("CC_EMAIL_2", "")
+PRIVATE_KEY_PATH = os.getenv(
+    "PRIVATE_KEY_PATH",
+    str((Path(__file__).resolve().parent / "keys" / "synapse_private_key.pem")),
+)
+LEGACY_PRIVATE_KEY_PATH = Path(__file__).resolve().parent / "keys" / "synapse_private.pem"
+if not os.path.isabs(PRIVATE_KEY_PATH):
+    PRIVATE_KEY_PATH = str((Path(__file__).resolve().parent / PRIVATE_KEY_PATH).resolve())
+if not os.path.exists(PRIVATE_KEY_PATH) and LEGACY_PRIVATE_KEY_PATH.exists():
+    PRIVATE_KEY_PATH = str(LEGACY_PRIVATE_KEY_PATH)
 
 AGENTS = []
 for key in os.environ:
@@ -60,6 +73,104 @@ for key in os.environ:
             })
 
 KEY_CONFIGURED = bool(AGENTS)
+FLOW_CACHE_TTL_SECONDS = 120
+EMAIL_FLOW_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def mint_jwt() -> str:
+    key_path = Path(PRIVATE_KEY_PATH)
+    if not key_path.exists():
+        raise FileNotFoundError(f"RSA private key not found at {key_path}")
+
+    private_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+    now = int(time.time())
+    payload = {
+        "iss": "synapse",
+        "aud": "ottom8",
+        "iat": now,
+        "exp": now + 299,
+    }
+    return jwt.encode(payload, private_key, algorithm="RS256")
+
+
+def fetch_flows_for_email(email: str) -> list[dict[str, Any]]:
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        raise ValueError("Email is required")
+
+    cached = EMAIL_FLOW_CACHE.get(normalized_email)
+    if cached and time.time() - cached[0] < FLOW_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    token = mint_jwt()
+    url = f"{PLATFORM_BASE}/api/v1/integrations/synapse/flows"
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={"email": normalized_email},
+        timeout=30,
+    )
+
+    if not response.ok:
+        raise RuntimeError(f"Platform API returned {response.status_code}: {response.text[:300]}")
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Platform API returned invalid JSON") from exc
+
+    flows = payload
+    if isinstance(payload, dict):
+        for key in ("flows", "data", "items", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                flows = value
+                break
+        else:
+            flows = []
+
+    if not isinstance(flows, list):
+        flows = []
+
+    mapped_agents = []
+    for item in flows:
+        if not isinstance(item, dict):
+            continue
+        flow_id = item.get("flow_id") or item.get("flowId") or item.get("id")
+        if not flow_id:
+            continue
+        name = item.get("name") or item.get("flow_name") or item.get("flowName") or f"Agent {len(mapped_agents) + 1}"
+        mapped_agents.append({
+            "id": str(flow_id),
+            "label": str(name),
+            "flow_id": str(flow_id),
+            "api_key": LANGFLOW_API_KEY,
+            "tool_name": "",
+            "description": item.get("description") or "",
+            "project_id": item.get("project_id") or item.get("projectId") or "",
+            "project_name": item.get("project_name") or item.get("projectName") or "",
+        })
+
+    EMAIL_FLOW_CACHE[normalized_email] = (time.time(), mapped_agents)
+    return mapped_agents
+
+
+def _get_agents_for_email(email: str) -> list[dict[str, Any]]:
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        return []
+
+    try:
+        return fetch_flows_for_email(normalized_email)
+    except Exception:
+        raise
 
 allow_origin_regex = r"https://.*\.vercel\.app"
 allow_origins = [origin for origin in [ALLOWED_ORIGIN, FRONTEND_DOMAIN] if origin]
@@ -285,7 +396,20 @@ def health():
 
 
 @app.get("/api/agents")
-def get_agents():
+def get_agents(email: Optional[str] = None):
+    normalized_email = _normalize_email(email)
+    if normalized_email:
+        try:
+            agents = _get_agents_for_email(normalized_email)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "message": "We couldn't find any agents for this email — check with your team.",
+                    "detail": str(exc),
+                },
+            )
+        return [_agent_public(agent) for agent in agents]
     return [_agent_public(agent) for agent in AGENTS]
 
 
@@ -346,8 +470,15 @@ def create_request(payload: RequestSubmission):
 
 
 @app.get("/api/traces")
-def get_traces(agent_id: str = "all", page: int = 1, size: int = 20):
-    if not KEY_CONFIGURED:
+def get_traces(agent_id: str = "all", page: int = 1, size: int = 20, email: Optional[str] = None):
+    agents_for_scope = AGENTS
+    requested_email = _normalize_email(email)
+    if requested_email:
+        try:
+            agents_for_scope = _get_agents_for_email(requested_email)
+        except Exception as exc:
+            return _error_response(f"Could not load agents for {requested_email}: {exc}")
+    if not agents_for_scope:
         return _error_response("No Langflow agents configured")
 
     page = max(1, page)
@@ -355,7 +486,7 @@ def get_traces(agent_id: str = "all", page: int = 1, size: int = 20):
     partial_errors = []
 
     if agent_id and agent_id != "all":
-        agent = _find_agent(agent_id)
+        agent = next((item for item in agents_for_scope if item["id"] == agent_id), None)
         if not agent:
             return _error_response("Agent not configured")
         all_traces, error = _fetch_all_traces_for_flow(agent["flow_id"], agent["api_key"], agent["tool_name"])
@@ -364,7 +495,7 @@ def get_traces(agent_id: str = "all", page: int = 1, size: int = 20):
         all_traces = [_tag_trace(trace, agent) for trace in all_traces]
     else:
         all_traces = []
-        for agent in AGENTS:
+        for agent in agents_for_scope:
             traces, error = _fetch_all_traces_for_flow(agent["flow_id"], agent["api_key"], agent["tool_name"])
             if error:
                 partial_errors.append({"agent_id": agent["id"], "error": error})
@@ -390,13 +521,20 @@ def get_traces(agent_id: str = "all", page: int = 1, size: int = 20):
 
 
 @app.get("/api/traces/{trace_id}")
-def get_trace_detail(trace_id: str, agent_id: str = "all"):
-    if not KEY_CONFIGURED:
+def get_trace_detail(trace_id: str, agent_id: str = "all", email: Optional[str] = None):
+    agents_for_scope = AGENTS
+    requested_email = _normalize_email(email)
+    if requested_email:
+        try:
+            agents_for_scope = _get_agents_for_email(requested_email)
+        except Exception as exc:
+            return _error_response(f"Could not load agents for {requested_email}: {exc}")
+    if not agents_for_scope:
         return _error_response("No Langflow agents configured")
 
-    agents = AGENTS
+    agents = agents_for_scope
     if agent_id and agent_id != "all":
-        agent = _find_agent(agent_id)
+        agent = next((item for item in agents_for_scope if item["id"] == agent_id), None)
         if not agent:
             return _error_response("Agent not configured")
         agents = [agent]
