@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Literal, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import jwt
 import requests
@@ -75,6 +76,8 @@ for key in os.environ:
 KEY_CONFIGURED = bool(AGENTS)
 FLOW_CACHE_TTL_SECONDS = 120
 EMAIL_FLOW_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+TRACE_FLOW_CACHE_TTL_SECONDS = 60
+TRACE_FLOW_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
 def _normalize_email(email: str) -> str:
@@ -268,6 +271,46 @@ def _trace_uses_agent_tool(trace, tool_name: str):
         return False
     except Exception:
         return False
+
+
+def _get_cached_flow_traces(flow_id: str, api_key: str, tool_name: str):
+    cached = TRACE_FLOW_CACHE.get(flow_id)
+    if cached and time.time() - cached[0] < TRACE_FLOW_CACHE_TTL_SECONDS:
+        return cached[1], None
+
+    traces, error = _fetch_all_traces_for_flow(flow_id, api_key, tool_name)
+    if error is None and traces is not None:
+        TRACE_FLOW_CACHE[flow_id] = (time.time(), traces)
+    return traces, error
+
+
+def _fetch_traces_for_agents(agents: list[dict[str, Any]]):
+    all_traces: list[dict[str, Any]] = []
+    partial_errors: list[dict[str, str]] = []
+
+    if not agents:
+        return all_traces, partial_errors
+
+    max_workers = min(10, len(agents))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_get_cached_flow_traces, agent["flow_id"], agent["api_key"], agent["tool_name"]): agent
+            for agent in agents
+        }
+        for future in as_completed(futures):
+            agent = futures[future]
+            try:
+                traces, error = future.result()
+            except Exception as exc:
+                partial_errors.append({"agent_id": agent["id"], "error": str(exc)})
+                continue
+            if error:
+                partial_errors.append({"agent_id": agent["id"], "error": error})
+                continue
+            all_traces.extend(_tag_trace(trace, agent) for trace in traces or [])
+
+    all_traces.sort(key=lambda t: t.get("startTime", ""), reverse=True)
+    return all_traces, partial_errors
 
 
 def _fetch_all_traces_for_flow(flow_id: str, api_key: str, tool_name: str):
@@ -489,19 +532,12 @@ def get_traces(agent_id: str = "all", page: int = 1, size: int = 20, email: Opti
         agent = next((item for item in agents_for_scope if item["id"] == agent_id), None)
         if not agent:
             return _error_response("Agent not configured")
-        all_traces, error = _fetch_all_traces_for_flow(agent["flow_id"], agent["api_key"], agent["tool_name"])
+        all_traces, error = _get_cached_flow_traces(agent["flow_id"], agent["api_key"], agent["tool_name"])
         if error:
             return _error_response(error)
         all_traces = [_tag_trace(trace, agent) for trace in all_traces]
     else:
-        all_traces = []
-        for agent in agents_for_scope:
-            traces, error = _fetch_all_traces_for_flow(agent["flow_id"], agent["api_key"], agent["tool_name"])
-            if error:
-                partial_errors.append({"agent_id": agent["id"], "error": error})
-                continue
-            all_traces.extend(_tag_trace(trace, agent) for trace in traces)
-        all_traces.sort(key=lambda t: t.get("startTime", ""), reverse=True)
+        all_traces, partial_errors = _fetch_traces_for_agents(agents_for_scope)
 
     total = len(all_traces)
     pages = max(1, math.ceil(total / size))
@@ -539,12 +575,28 @@ def get_trace_detail(trace_id: str, agent_id: str = "all", email: Optional[str] 
             return _error_response("Agent not configured")
         agents = [agent]
 
-    for agent in agents:
-        all_traces, error = _fetch_all_traces_for_flow(agent["flow_id"], agent["api_key"], agent["tool_name"])
-        if error:
-            continue
-        match: Optional[dict] = next((t for t in all_traces if t.get("id") == trace_id), None)
-        if match:
-            return _tag_trace(match, agent)
+    if agent_id and agent_id != "all":
+        all_traces, error = _get_cached_flow_traces(agents[0]["flow_id"], agents[0]["api_key"], agents[0]["tool_name"])
+        if not error:
+            match: Optional[dict] = next((t for t in all_traces if t.get("id") == trace_id), None)
+            if match:
+                return _tag_trace(match, agents[0])
+    else:
+        with ThreadPoolExecutor(max_workers=min(10, len(agents))) as executor:
+            futures = {
+                executor.submit(_get_cached_flow_traces, agent["flow_id"], agent["api_key"], agent["tool_name"]): agent
+                for agent in agents
+            }
+            for future in as_completed(futures):
+                agent = futures[future]
+                try:
+                    all_traces, error = future.result()
+                except Exception:
+                    continue
+                if error:
+                    continue
+                match = next((t for t in all_traces if t.get("id") == trace_id), None)
+                if match:
+                    return _tag_trace(match, agent)
 
     return _error_response("Trace not found")

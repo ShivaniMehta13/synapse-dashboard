@@ -1159,7 +1159,13 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
   useEffect(() => {
     let active = true;
     fetchAgents(loggedInEmail).then((items) => {
-      if (active) setAgents(items);
+      if (!active) return;
+      setAgents(items);
+      setSelectedAgentId((current) => {
+        if (current !== "all") return current;
+        if (items.length > 1) return items[0]?.id || "all";
+        return "all";
+      });
     });
     return () => { active = false; };
   }, [loggedInEmail]);
