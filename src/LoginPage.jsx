@@ -121,7 +121,7 @@ export default function LoginPage({ onLoginSuccess }) {
           </div>
           <div>
             <div className="syn-login-name">Synapse</div>
-            <div className="syn-login-sub">Financial News Intelligence Agent</div>
+            <div className="syn-login-sub">Sign in to view your agents</div>
           </div>
         </div>
 
