@@ -616,6 +616,16 @@ const statusLabel = (value) => {
   return v || "—";
 };
 const jsonString = (value) => JSON.stringify(value, null, 2);
+const complianceRowKey = (item) => {
+  if (item?.id != null) return `id:${item.id}`;
+  return [
+    item?.treaty_audit_id || item?.audit_id || "",
+    item?.action_timestamp || item?.created_at || "",
+    item?.compliance_status || "",
+    item?.verification_status || "",
+    item?.email_id || "",
+  ].join("|");
+};
 
 /* ----------------------------- small components ---------------------------- */
 
@@ -1345,6 +1355,7 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
   const [fromTs, setFromTs] = useState("");
   const [toTs, setToTs] = useState("");
   const loadId = useRef(0);
+  const detailRequestId = useRef(0);
 
   const load = useCallback(async (nextPage = 1) => {
     const id = loadId.current + 1;
@@ -1381,9 +1392,12 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
   useEffect(() => { setSelected(null); setDetail(null); }, [selectedAgentId]);
   useEffect(() => {
     if (!selected) return;
+    const requestId = detailRequestId.current + 1;
+    detailRequestId.current = requestId;
     setDetail(null);
     setDetailLoading(true);
-    fetchTreatyComplianceDetail(selected.audit_id || selected.id).then((result) => {
+    fetchTreatyComplianceDetail(selected.id ?? selected.treaty_audit_id ?? selected.audit_id).then((result) => {
+      if (requestId !== detailRequestId.current) return;
       setDetail(result);
       setDetailLoading(false);
     });
@@ -1460,7 +1474,7 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
                 <tr><td colSpan={10} style={{ textAlign: "center", padding: 28, color: "var(--muted)", cursor: "default" }}>No Treaty compliance actions found.</td></tr>
               )}
               {filteredItems.map((item) => (
-                <tr key={item.id || item.audit_id} onClick={() => setSelected(item)} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") setSelected(item); }}>
+                <tr key={complianceRowKey(item)} onClick={() => setSelected(item)} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") setSelected(item); }}>
                   <td className="td-ellip" title={item.action_type}>{normalizeText(item.action_type)}</td>
                   <td className="td-ellip" title={item.agent_name}>{normalizeText(item.agent_name)}</td>
                   <td style={{ whiteSpace: "nowrap" }}>{fmtDateTime(item.action_timestamp || item.created_at)}</td>
