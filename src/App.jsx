@@ -627,6 +627,25 @@ const complianceRowKey = (item) => {
   ].join("|");
 };
 
+const COMPLIANCE_POLICIES = [
+  { id: "POLICY-GOV-001", name: "Authorized Action Scope", description: "The agent must only perform actions that are explicitly within its assigned role, workflow, and permitted tools." },
+  { id: "POLICY-GOV-001-A", name: "Treaty Review Email Action", description: "TREATY_REVIEW_EMAIL is a permitted workflow action for the Treaty Comparison Agent when used to communicate or route a treaty review within the defined workflow. The presence of the TREATY_REVIEW_EMAIL action type alone must not be treated as an unauthorized action or a policy violation." },
+  { id: "POLICY-GOV-002", name: "Data Access Scope", description: "The agent must only access data required for the current request or task. It must not retrieve unrelated user, customer, project, or system data." },
+  { id: "POLICY-GOV-003", name: "Sensitive Data Protection", description: "The agent must not expose, store, or transmit sensitive data unless it is required for the task and permitted by policy." },
+  { id: "POLICY-GOV-004", name: "Permissioned Tool Usage", description: "The agent must only call tools, APIs, connectors, or systems that it is authorized to use." },
+  { id: "POLICY-GOV-005", name: "Human Approval for High-Risk Actions", description: "The agent must request human approval before performing high-risk, irreversible, financial, legal, public-facing, or business-critical actions." },
+  { id: "POLICY-GOV-006", name: "No Unauthorized Modification", description: "The agent must not create, update, delete, approve, publish, send, or execute anything unless the action is clearly requested and allowed." },
+  { id: "POLICY-GOV-007", name: "Evidence Requirement", description: "Every significant action must have supporting evidence, including the original request, data used, tool called, decision made, and final outcome." },
+  { id: "POLICY-GOV-008", name: "Explainability Requirement", description: "The agent must provide a clear reason for important decisions, especially when an action is approved, blocked, escalated, or flagged." },
+  { id: "POLICY-GOV-009", name: "Audit Logging Requirement", description: "Every agent run must be logged with agent ID, run ID, requester, input, action taken, tool used, output, timestamp, status, and any issue flagged." },
+  { id: "POLICY-GOV-010", name: "Error and Failure Handling", description: "If the agent is uncertain, missing required data, receives an error, or cannot verify the result, it must not proceed silently. It should flag the issue or escalate." },
+  { id: "POLICY-GOV-011", name: "Output Safety and Accuracy", description: "The agent must not fabricate facts, confirmations, records, approvals, or execution results. If information is unavailable, it must state that clearly." },
+  { id: "POLICY-GOV-012", name: "External Communication Control", description: "The agent must not send emails, messages, posts, reports, or public communications unless the workflow permits it and the content is appropriate for the recipient/channel." },
+  { id: "POLICY-GOV-013", name: "Policy Conflict Handling", description: "If two or more policies conflict, the stricter policy must apply. The agent should flag the conflict for review." },
+  { id: "POLICY-GOV-014", name: "Rate Limit and Cost Awareness", description: "The agent must avoid unnecessary tool calls, repeated retries, excessive token usage, or actions that create avoidable API/platform costs." },
+  { id: "POLICY-GOV-015", name: "Escalation for High-Severity Events", description: "Any high-severity violation, blocked action, suspicious activity, or repeated failure must be surfaced in Synapse as an alert." },
+];
+
 /* ----------------------------- small components ---------------------------- */
 
 const Icon = ({ d, size = 16 }) => (
@@ -1354,6 +1373,7 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [fromTs, setFromTs] = useState("");
   const [toTs, setToTs] = useState("");
+  const [policiesVisible, setPoliciesVisible] = useState(false);
   const loadId = useRef(0);
   const detailRequestId = useRef(0);
 
@@ -1419,6 +1439,32 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
       </div>
 
       {error && <div className="syn-login-message err">{error}</div>}
+
+      <section className="syn-card" style={{ marginBottom: 14 }}>
+        <div className="syn-row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <div className="syn-label">Compliance Policies</div>
+            <p className="syn-sub" style={{ margin: "5px 0 0" }}>Rules enforced by the compliance agent</p>
+          </div>
+          <button className="syn-btn" onClick={() => setPoliciesVisible((visible) => !visible)} aria-expanded={policiesVisible}>
+            {policiesVisible ? "Hide policies" : "Show policies"}
+          </button>
+        </div>
+        {policiesVisible && (
+          <div className="syn-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 420px), 1fr))", marginTop: 14 }}>
+            {COMPLIANCE_POLICIES.map((policy) => (
+              <article className="syn-card" key={policy.id} style={{ padding: 14 }}>
+                <div className="syn-row" style={{ gap: 7, alignItems: "center" }}>
+                  <Icon d={ICONS.shield} size={15} />
+                  <span className="syn-chip chip-neutral">{policy.id}</span>
+                </div>
+                <div style={{ fontWeight: 650, marginTop: 12 }}>{policy.name}</div>
+                <div style={{ color: "var(--ink-2)", fontSize: 13, lineHeight: 1.55, marginTop: 6 }}>{policy.description}</div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="syn-metrics">
         <Metric label="Total Actions" value={summary.total_actions || 0} tone="accent" sub="Compliance records" />
