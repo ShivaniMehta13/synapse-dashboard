@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { fetchAgents, fetchTraces, logout as apiLogout } from "./services/api";
+import { fetchAgents, fetchTraces, fetchTreatyCompliance, fetchTreatyComplianceDetail, logout as apiLogout } from "./services/api";
 
 /* ============================================================================
    SYNAPSE — control plane for Hello Agent (manager-facing edition)
@@ -250,6 +250,19 @@ table.syn-table { width:100%; border-collapse: collapse; font-size: 13px; min-wi
 .syn-kv .k { color: var(--muted); }
 .syn-kv .v { min-width:0; overflow-wrap:anywhere; }
 .syn-block { background: var(--surface-2); border:1px solid var(--line); border-radius: 10px; padding: 11px 13px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap:anywhere; max-height: 240px; overflow-y:auto; }
+.syn-json {
+  margin: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre;
+  font-family: var(--mono);
+}
 .syn-sec { margin-top: 18px; }
 .syn-sec > .syn-label { display:block; margin-bottom: 7px; }
 
@@ -586,6 +599,23 @@ const fmtTime = (iso) => {
   if (isNaN(d)) return String(iso);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 };
+const fmtDateTime = fmtTime;
+const safeJson = (value) => {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try { return JSON.parse(trimmed); } catch { return value; }
+  }
+  return value;
+};
+const normalizeText = (value) => String(value || "").trim() || "—";
+const statusLabel = (value) => {
+  const v = String(value || "").toUpperCase();
+  if (v === "UNVERIFIABLE") return "Needs Review";
+  return v || "—";
+};
+const jsonString = (value) => JSON.stringify(value, null, 2);
 
 /* ----------------------------- small components ---------------------------- */
 
@@ -608,6 +638,11 @@ const ICONS = {
   menu: ["M3 6h18", "M3 12h18", "M3 18h18"],
   plus: ["M12 5v14", "M5 12h14"],
   check: ["M20 6L9 17l-5-5"],
+  shield: ["M12 3l7 3v5c0 5-3.2 9.2-7 10-3.8-.8-7-5-7-10V6l7-3z", "M9.5 12l1.8 1.8L15.5 10"],
+  alert: ["M12 9v4", "M12 17h.01", "M10.3 4.3l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-2.7l-8-14a2 2 0 0 0-3.4 0z"],
+  document: ["M7 3h7l5 5v13H7z", "M14 3v5h5"],
+  copy: ["M9 9h10v12H9z", "M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"],
+  eye: ["M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z", "M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"],
 };
 
 function EnvBadge({ env }) {
@@ -625,6 +660,23 @@ function FlagChip({ flagged }) {
   return flagged
     ? <span className="syn-chip chip-warn"><span className="syn-dot" />Flagged</span>
     : <span className="syn-chip chip-neutral">None</span>;
+}
+
+function ComplianceStatusChip({ status }) {
+  const v = String(status || "").toUpperCase();
+  if (v === "COMPLIANT") return <span className="syn-chip chip-ok"><span className="syn-dot" />Compliant</span>;
+  if (v === "VIOLATION") return <span className="syn-chip chip-err"><span className="syn-dot" />Violation</span>;
+  if (v === "UNVERIFIABLE") return <span className="syn-chip chip-warn"><span className="syn-dot" />Needs Review</span>;
+  return <span className="syn-chip chip-neutral">{statusLabel(v)}</span>;
+}
+
+function SeverityChip({ severity }) {
+  const v = String(severity || "").toUpperCase();
+  if (!v || v === "NONE") return <span className="syn-chip chip-neutral">None</span>;
+  if (v === "LOW") return <span className="syn-chip chip-ok">Low</span>;
+  if (v === "MEDIUM") return <span className="syn-chip chip-warn">Medium</span>;
+  if (v === "HIGH" || v === "CRITICAL") return <span className="syn-chip chip-err">{v}</span>;
+  return <span className="syn-chip chip-neutral">{v}</span>;
 }
 
 function Metric({ label, value, sub, tone }) {
@@ -1113,7 +1165,331 @@ function WorkDonePage({ metrics, isLive, onRefresh, loading, pageInfo, onPageCha
           </div>
         )}
       </div>
-      {selected && <ExecutionDrawer run={selected} onClose={() => setSelected(null)} isLive={isLive} />}
+  {selected && <ExecutionDrawer run={selected} onClose={() => setSelected(null)} isLive={isLive} />}
+  </div>
+  );
+}
+
+function JsonPanel({ value, title = "Raw JSON" }) {
+  const [copied, setCopied] = useState(false);
+  const parsed = safeJson(value);
+  const raw = typeof value === "string" ? value : jsonString(parsed ?? value);
+  const text = typeof raw === "string" ? raw : jsonString(raw);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch (e) {}
+  };
+  return (
+    <details className="syn-details" open>
+      <summary>{title}</summary>
+      <div className="syn-details-body">
+        <div className="syn-row" style={{ justifyContent: "flex-end", marginBottom: 8 }}>
+          <button className="syn-btn" onClick={copy}><Icon d={ICONS.copy} size={14} />{copied ? "Copied" : "Copy"}</button>
+        </div>
+        <pre className="syn-json">{text || "—"}</pre>
+      </div>
+    </details>
+  );
+}
+
+function ComplianceDrawer({ item, detail, onClose, loading }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  if (!item) return null;
+  const row = detail || item;
+  const timeline = row.timeline || [];
+  const evidence = safeJson(row.evidence_json);
+  const issues = safeJson(row.issues);
+  const missingEvidence = safeJson(row.missing_evidence);
+  const eventData = safeJson(row.event_data);
+  return (
+    <>
+      <div className="syn-scrim" onClick={onClose} />
+      <aside className="syn-drawer" role="dialog" aria-modal="true" aria-label="Compliance action details">
+        <div className="syn-drawer-head">
+          <div style={{ minWidth: 0 }}>
+            <div className="syn-row" style={{ marginBottom: 6 }}>
+              <ComplianceStatusChip status={row.compliance_status} />
+              <SeverityChip severity={row.severity} />
+              <span className="syn-chip chip-neutral">{normalizeText(row.verification_status)}</span>
+            </div>
+            <div style={{ fontWeight: 650, fontSize: 15, overflowWrap: "anywhere" }}>
+              {normalizeText(row.action_type)} · {normalizeText(row.agent_name)}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{fmtDateTime(row.action_timestamp || row.created_at)}</div>
+          </div>
+          <button className="syn-btn" onClick={onClose} aria-label="Close details" style={{ marginLeft: "auto", padding: "6px 8px" }}>
+            <Icon d={ICONS.close} />
+          </button>
+        </div>
+        <div className="syn-drawer-body">
+          {loading && <p style={{ color: "var(--muted)" }}>Loading…</p>}
+          <div className="syn-kv">
+            <div className="k">Audit ID</div><div className="v syn-mono">{normalizeText(row.audit_id || row.treaty_audit_id || row.id)}</div>
+            <div className="k">Agent</div><div className="v">{normalizeText(row.agent_name)}</div>
+            <div className="k">Action type</div><div className="v">{normalizeText(row.action_type)}</div>
+            <div className="k">Action status</div><div className="v">{normalizeText(row.action_status)}</div>
+            <div className="k">Timestamp</div><div className="v">{fmtDateTime(row.action_timestamp || row.created_at)}</div>
+            <div className="k">Session ID</div><div className="v syn-mono">{normalizeText(row.session_id)}</div>
+            <div className="k">Email ID</div><div className="v syn-mono">{normalizeText(row.email_id)}</div>
+            <div className="k">Sender email</div><div className="v">{normalizeText(row.sender_email)}</div>
+          </div>
+
+          <div className="syn-sec">
+            <span className="syn-label">Compliance decision</span>
+            <div className="syn-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", marginTop: 8 }}>
+              <div className="syn-card" style={{ padding: 14 }}>
+                <div className="syn-label">Status</div>
+                <div style={{ marginTop: 8 }}><ComplianceStatusChip status={row.compliance_status} /></div>
+              </div>
+              <div className="syn-card" style={{ padding: 14 }}>
+                <div className="syn-label">Severity</div>
+                <div style={{ marginTop: 8 }}><SeverityChip severity={row.severity} /></div>
+              </div>
+              <div className="syn-card" style={{ padding: 14 }}>
+                <div className="syn-label">Verification</div>
+                <div style={{ marginTop: 8 }}>{normalizeText(row.verification_status)}</div>
+              </div>
+            </div>
+            <div className="syn-kv" style={{ gridTemplateColumns: "150px 1fr", marginTop: 10 }}>
+              <div className="k">Violation type</div><div className="v">{normalizeText(row.violation_type)}</div>
+              <div className="k">Reason</div><div className="v">{normalizeText(row.reason)}</div>
+              <div className="k">Policy ID</div><div className="v syn-mono">{normalizeText(row.policy_id)}</div>
+              <div className="k">Policy version</div><div className="v syn-mono">{normalizeText(row.policy_version)}</div>
+              <div className="k">Route</div><div className="v syn-mono">{normalizeText(row.route)}</div>
+              <div className="k">Decision supported</div><div className="v">{row.decision_supported == null ? "—" : String(row.decision_supported)}</div>
+            </div>
+          </div>
+
+          <div className="syn-sec">
+            <span className="syn-label">Policy</span>
+            <div className="syn-block" style={{ marginTop: 8 }}>
+              <div><strong>Policy ID:</strong> {normalizeText(row.policy_id)}</div>
+              <div><strong>Policy version:</strong> {normalizeText(row.policy_version)}</div>
+              <div><strong>Relevant requirement:</strong> {normalizeText(row.reason || row.violation_type)}</div>
+              <div><strong>Policy reference:</strong> {normalizeText(row.route)}</div>
+            </div>
+          </div>
+
+          <div className="syn-sec">
+            <span className="syn-label">Evidence</span>
+            <div className="syn-block" style={{ marginTop: 8 }}>
+              <div><strong>Evidence integrity:</strong> {normalizeText(row.evidence_integrity)}</div>
+              <div><strong>Verification reason:</strong> {normalizeText(row.verification_reason)}</div>
+              <div><strong>Issues:</strong> {issues ? jsonString(issues) : "—"}</div>
+              <div><strong>Missing evidence:</strong> {missingEvidence ? jsonString(missingEvidence) : "—"}</div>
+            </div>
+          </div>
+
+          <div className="syn-sec">
+            <span className="syn-label">Evidence summary</span>
+            <div className="syn-block" style={{ marginTop: 8, whiteSpace: "pre-wrap" }}>
+              {evidence ? (typeof evidence === "string" ? evidence : "Structured evidence available below.") : "Evidence unavailable for this action."}
+            </div>
+          </div>
+
+          <JsonPanel title="Structured evidence" value={evidence} />
+          <JsonPanel title="Raw JSON" value={row.evidence_json || row.event_data || row} />
+
+          {timeline.length > 0 && (
+            <div className="syn-sec">
+              <span className="syn-label">Audit timeline</span>
+              <div className="syn-tl" style={{ marginTop: 10 }}>
+                {timeline.map((step, idx) => (
+                  <div key={`${step.audit_id || idx}-${idx}`} className="syn-tl-item done">
+                    <div className="syn-tl-title">
+                      {normalizeText(step.event_type)}
+                      <span className="syn-chip chip-neutral">{normalizeText(step.event_status)}</span>
+                    </div>
+                    <div className="syn-tl-meta">{fmtDateTime(step.created_at)} · {normalizeText(step.audit_id || step.email_id)}</div>
+                    <div className="syn-block" style={{ marginTop: 7 }}>{typeof step.event_data === "string" ? step.event_data : jsonString(step.event_data || {})}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {eventData && (
+            <div className="syn-sec">
+              <span className="syn-label">Correlated event data</span>
+              <div className="syn-block syn-mono" style={{ marginTop: 8 }}>{jsonString(eventData)}</div>
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function CompliancePage({ onRefreshSignal, selectedAgentId }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [items, setItems] = useState([]);
+  const [summary, setSummary] = useState({ total_actions: 0, compliant: 0, violations: 0, unverifiable: 0, high_critical: 0 });
+  const [page, setPage] = useState(1);
+  const [pages, setPages] = useState(1);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [severityFilter, setSeverityFilter] = useState("ALL");
+  const [actionTypeFilter, setActionTypeFilter] = useState("ALL");
+  const [verificationFilter, setVerificationFilter] = useState("ALL");
+  const [selected, setSelected] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [fromTs, setFromTs] = useState("");
+  const [toTs, setToTs] = useState("");
+  const loadId = useRef(0);
+
+  const load = useCallback(async (nextPage = 1) => {
+    const id = loadId.current + 1;
+    loadId.current = id;
+    setLoading(true);
+    const response = await fetchTreatyCompliance({
+      page: nextPage,
+      size: 20,
+      q: query.trim(),
+      compliance_status: statusFilter,
+      severity: severityFilter,
+      action_type: actionTypeFilter,
+      verification_status: verificationFilter,
+      from_ts: fromTs || undefined,
+      to_ts: toTs || undefined,
+    });
+    if (id !== loadId.current) return;
+    if (response?.source === "error") {
+      setError(response.error || response.message || "Failed to load compliance data");
+      setItems([]);
+      setSummary({ total_actions: 0, compliant: 0, violations: 0, unverifiable: 0, high_critical: 0 });
+      setPages(1);
+    } else {
+      setError("");
+      setItems(response.items || []);
+      setSummary(response.summary || { total_actions: 0, compliant: 0, violations: 0, unverifiable: 0, high_critical: 0 });
+      setPages(response.pages || 1);
+    }
+    setPage(response.page || nextPage);
+    setLoading(false);
+  }, [actionTypeFilter, fromTs, query, severityFilter, statusFilter, toTs, verificationFilter]);
+
+  useEffect(() => { load(1); }, [load, selectedAgentId, onRefreshSignal]);
+  useEffect(() => { setSelected(null); setDetail(null); }, [selectedAgentId]);
+  useEffect(() => {
+    if (!selected) return;
+    setDetail(null);
+    setDetailLoading(true);
+    fetchTreatyComplianceDetail(selected.audit_id || selected.id).then((result) => {
+      setDetail(result);
+      setDetailLoading(false);
+    });
+  }, [selected]);
+
+  const filteredItems = useMemo(() => items, [items]);
+
+  const refresh = () => load(page);
+  return (
+    <div>
+      <div className="syn-row syn-page-head" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h1 className="syn-h1">Compliance</h1>
+          <p className="syn-sub">Treaty compliance monitoring for comparison actions, evidence, and verification results.</p>
+        </div>
+        <button className="syn-btn" onClick={refresh} disabled={loading}>
+          <Icon d={ICONS.refresh} size={14} />{loading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {error && <div className="syn-login-message err">{error}</div>}
+
+      <div className="syn-metrics">
+        <Metric label="Total Actions" value={summary.total_actions || 0} tone="accent" sub="Compliance records" />
+        <Metric label="Compliant" value={summary.compliant || 0} tone="ok" sub="Actions that passed review" />
+        <Metric label="Violations" value={summary.violations || 0} tone="err" sub="Actions that failed policy" />
+        <Metric label="Needs Review" value={summary.unverifiable || 0} tone="warn" sub="Unverifiable results" />
+        <Metric label="High / Critical Issues" value={summary.high_critical || 0} tone="err" sub="Escalation candidates" />
+      </div>
+
+      <div className="syn-filters">
+        <div className="syn-search" style={{ maxWidth: 420 }}>
+          <Icon d={ICONS.search} size={14} />
+          <input placeholder="Search audit ID, session ID, email ID, sender, action, policy…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <div className="syn-seg"><button className={statusFilter === "ALL" ? "active" : ""} onClick={() => setStatusFilter("ALL")}>All Status</button><button className={statusFilter === "COMPLIANT" ? "active" : ""} onClick={() => setStatusFilter("COMPLIANT")}>Compliant</button><button className={statusFilter === "VIOLATION" ? "active" : ""} onClick={() => setStatusFilter("VIOLATION")}>Violation</button><button className={statusFilter === "UNVERIFIABLE" ? "active" : ""} onClick={() => setStatusFilter("UNVERIFIABLE")}>Needs Review</button></div>
+        <select className="syn-btn" value={severityFilter} onChange={(e) => setSeverityFilter(e.target.value)}>
+          <option value="ALL">All severities</option><option>NONE</option><option>LOW</option><option>MEDIUM</option><option>HIGH</option><option>CRITICAL</option>
+        </select>
+        <select className="syn-btn" value={verificationFilter} onChange={(e) => setVerificationFilter(e.target.value)}>
+          <option value="ALL">All verification</option><option>VERIFIED</option><option>UNVERIFIED</option><option>NEEDS_REVIEW</option>
+        </select>
+        <select className="syn-btn" value={actionTypeFilter} onChange={(e) => setActionTypeFilter(e.target.value)}>
+          <option value="ALL">All action types</option>
+          {Array.from(new Set(items.map((item) => item.action_type).filter(Boolean))).map((value) => <option key={value}>{value}</option>)}
+        </select>
+        <input className="syn-btn" type="date" value={fromTs} onChange={(e) => setFromTs(e.target.value)} />
+        <input className="syn-btn" type="date" value={toTs} onChange={(e) => setToTs(e.target.value)} />
+        <button className="syn-btn primary" onClick={() => load(1)} disabled={loading}>Apply</button>
+      </div>
+
+      <div className="syn-tablewrap">
+        <div className="syn-tablescroll">
+          <table className="syn-table">
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Agent</th>
+                <th>Timestamp</th>
+                <th>Audit ID</th>
+                <th>Session ID</th>
+                <th>Email ID</th>
+                <th>Status</th>
+                <th>Severity</th>
+                <th>Policy</th>
+                <th>Verification</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && filteredItems.length === 0 && (
+                <tr><td colSpan={10} style={{ textAlign: "center", padding: 28, color: "var(--muted)", cursor: "default" }}>Loading compliance actions…</td></tr>
+              )}
+              {!loading && filteredItems.length === 0 && (
+                <tr><td colSpan={10} style={{ textAlign: "center", padding: 28, color: "var(--muted)", cursor: "default" }}>No Treaty compliance actions found.</td></tr>
+              )}
+              {filteredItems.map((item) => (
+                <tr key={item.id || item.audit_id} onClick={() => setSelected(item)} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") setSelected(item); }}>
+                  <td className="td-ellip" title={item.action_type}>{normalizeText(item.action_type)}</td>
+                  <td className="td-ellip" title={item.agent_name}>{normalizeText(item.agent_name)}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>{fmtDateTime(item.action_timestamp || item.created_at)}</td>
+                  <td className="syn-mono td-ellip" title={item.audit_id || item.treaty_audit_id}>{normalizeText(item.audit_id || item.treaty_audit_id)}</td>
+                  <td className="syn-mono td-ellip" title={item.session_id}>{normalizeText(item.session_id)}</td>
+                  <td className="syn-mono td-ellip" title={item.email_id}>{normalizeText(item.email_id)}</td>
+                  <td><ComplianceStatusChip status={item.compliance_status} /></td>
+                  <td><SeverityChip severity={item.severity} /></td>
+                  <td className="syn-mono td-ellip" title={item.policy_id}>{normalizeText(item.policy_id)}</td>
+                  <td>{normalizeText(item.verification_status)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="syn-row" style={{ justifyContent: "space-between", marginTop: 10 }}>
+        <p style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>{`${filteredItems.length} action${filteredItems.length === 1 ? "" : "s"} in view.`}</p>
+        {pages > 1 && (
+          <div className="syn-row">
+            <button className="syn-btn" disabled={loading || page <= 1} onClick={() => load(page - 1)}>Previous</button>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>page {page} of {pages}</span>
+            <button className="syn-btn" disabled={loading || page >= pages} onClick={() => load(page + 1)}>Next</button>
+          </div>
+        )}
+      </div>
+
+      {selected && <ComplianceDrawer item={selected} detail={detail} loading={detailLoading} onClose={() => setSelected(null)} />}
     </div>
   );
 }
@@ -1125,6 +1501,7 @@ const NAV = [
   { id: "connector", label: "Connector", icon: "connectors" },
   { id: "workflow", label: "Workflow", icon: "workflows" },
   { id: "work", label: "Work Done by Agent", icon: "work" },
+  { id: "compliance", label: "Compliance", icon: "shield" },
 ];
 
 export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
@@ -1287,6 +1664,11 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
                   pageInfo={{ page: tracePage, pages: traceResult.pages || 1, total: traceResult.total }}
                   onPageChange={(p) => load(p, selectedAgentId)}
                   showAgentColumn={selectedAgentId === "all"}
+                  selectedAgentId={selectedAgentId}
+                />
+              )}
+              {page === "compliance" && (
+                <CompliancePage
                   selectedAgentId={selectedAgentId}
                 />
               )}

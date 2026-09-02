@@ -15,6 +15,8 @@ import math
 import os
 import re
 import time
+import json
+import logging
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -23,12 +25,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import jwt
 import requests
+import psycopg2
+import psycopg2.extras
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 try:
     from auth import router as auth_router
@@ -47,6 +53,8 @@ FROM_EMAIL = os.getenv("FROM_EMAIL", "")
 TEST_TO_EMAIL = os.getenv("TEST_TO_EMAIL", "")
 CC_EMAIL_1 = os.getenv("CC_EMAIL_1", "")
 CC_EMAIL_2 = os.getenv("CC_EMAIL_2", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+COMPLIANCE_SCHEMA = os.getenv("COMPLIANCE_SCHEMA", "public")
 PRIVATE_KEY_PATH = os.getenv(
     "PRIVATE_KEY_PATH",
     str((Path(__file__).resolve().parent / "keys" / "synapse_private_key.pem")),
@@ -78,6 +86,8 @@ FLOW_CACHE_TTL_SECONDS = 120
 EMAIL_FLOW_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 TRACE_FLOW_CACHE_TTL_SECONDS = 60
 TRACE_FLOW_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+COMPLIANCE_CACHE_TTL_SECONDS = 30
+COMPLIANCE_CACHE: dict[str, tuple[float, list[dict[str, Any]], dict[str, int], int]] = {}
 
 
 def _normalize_email(email: str) -> str:
@@ -384,6 +394,311 @@ def _format_field_value(value):
     if isinstance(value, (dict, list)):
         return escape(str(value))
     return escape(str(value))
+
+
+def _db_connect():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _json_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return value
+        try:
+            return json.loads(text)
+        except Exception:
+            return value
+    return value
+
+
+def _normalize_status(value):
+    return str(value or "").strip().upper() or None
+
+
+def _normalize_datetime(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _serialize_compliance_row(row: dict[str, Any]):
+    evidence_json = _json_value(row.get("evidence_json"))
+    issues = _json_value(row.get("issues"))
+    missing_evidence = _json_value(row.get("missing_evidence"))
+    event_data = _json_value(row.get("event_data") or row.get("log_event_data"))
+    return {
+        "id": row.get("id"),
+        "treaty_audit_id": row.get("treaty_audit_id"),
+        "audit_id": row.get("audit_id") or row.get("treaty_audit_id"),
+        "session_id": row.get("session_id") or row.get("log_session_id"),
+        "email_id": row.get("email_id"),
+        "sender_email": row.get("sender_email"),
+        "agent_name": row.get("agent_name"),
+        "action_type": row.get("action_type"),
+        "event_type": row.get("event_type") or row.get("log_event_type"),
+        "action_status": row.get("action_status"),
+        "action_timestamp": _normalize_datetime(row.get("action_timestamp")),
+        "compliance_status": _normalize_status(row.get("compliance_status")),
+        "verification_status": _normalize_status(row.get("verification_status")),
+        "route": row.get("route"),
+        "policy_id": row.get("policy_id"),
+        "policy_version": row.get("policy_version"),
+        "violation_type": row.get("violation_type"),
+        "severity": _normalize_status(row.get("severity")),
+        "reason": row.get("reason"),
+        "decision_supported": row.get("decision_supported"),
+        "evidence_integrity": row.get("evidence_integrity"),
+        "verification_reason": row.get("verification_reason"),
+        "issues": issues,
+        "missing_evidence": missing_evidence,
+        "evidence_json": evidence_json,
+        "created_at": _normalize_datetime(row.get("created_at") or row.get("log_created_at")),
+        "verified_at": _normalize_datetime(row.get("verified_at")),
+        "event_data": event_data,
+    }
+
+
+def _compliance_cache_key(filters: dict[str, Any]) -> str:
+    return json.dumps(filters, sort_keys=True, default=str)
+
+
+def _load_treaty_compliance(filters: dict[str, Any]):
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not configured")
+
+    cache_key = _compliance_cache_key(filters)
+    cached = COMPLIANCE_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < COMPLIANCE_CACHE_TTL_SECONDS:
+        return cached[1], cached[2], cached[3]
+
+    where = []
+    params: list[Any] = []
+    if filters.get("compliance_status"):
+        where.append("upper(coalesce(ca.compliance_status, '')) = upper(%s)")
+        params.append(filters["compliance_status"])
+    if filters.get("severity"):
+        where.append("upper(coalesce(ca.severity, '')) = upper(%s)")
+        params.append(filters["severity"])
+    if filters.get("action_type"):
+        where.append("upper(coalesce(ca.action_type, '')) = upper(%s)")
+        params.append(filters["action_type"])
+    if filters.get("verification_status"):
+        where.append("upper(coalesce(ca.verification_status, '')) = upper(%s)")
+        params.append(filters["verification_status"])
+    if filters.get("q"):
+        q = f"%{filters['q']}%"
+        where.append("("
+            "coalesce(ca.treaty_audit_id::text, '') ilike %s or "
+            "coalesce(ca.session_id::text, '') ilike %s or "
+            "coalesce(ca.email_id::text, '') ilike %s or "
+            "coalesce(ca.sender_email, '') ilike %s or "
+            "coalesce(ca.action_type, '') ilike %s or "
+            "coalesce(ca.policy_id, '') ilike %s"
+        ")")
+        params.extend([q, q, q, q, q, q])
+    if filters.get("from"):
+        where.append("coalesce(ca.action_timestamp, ca.created_at) >= %s")
+        params.append(filters["from"])
+    if filters.get("to"):
+        where.append("coalesce(ca.action_timestamp, ca.created_at) <= %s")
+        params.append(filters["to"])
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    offset = max(0, (filters["page"] - 1) * filters["size"])
+    size = filters["size"]
+
+    query = f"""
+        SELECT
+          ca.*
+        FROM {COMPLIANCE_SCHEMA}.compliance_audit_results ca
+        {where_sql}
+        ORDER BY coalesce(ca.action_timestamp, ca.created_at) DESC NULLS LAST, ca.id DESC
+        LIMIT %s OFFSET %s
+    """
+
+    count_query = f"""
+        SELECT count(*) AS total
+        FROM {COMPLIANCE_SCHEMA}.compliance_audit_results ca
+        {where_sql}
+    """
+
+    summary_query = f"""
+        SELECT
+          count(*) AS total_actions,
+          count(*) FILTER (WHERE upper(trim(coalesce(ca.compliance_status, ''))) IN ('COMPLIANT', 'PASS', 'PASSED', 'SUCCESS')) AS compliant,
+          count(*) FILTER (WHERE upper(trim(coalesce(ca.compliance_status, ''))) IN ('VIOLATION', 'NON_COMPLIANT', 'NON-COMPLIANT', 'FAILED')) AS violations,
+          count(*) FILTER (WHERE upper(trim(coalesce(ca.compliance_status, ''))) IN ('UNVERIFIABLE', 'NEEDS_REVIEW', 'REVIEW', 'UNKNOWN')) AS unverifiable,
+          count(*) FILTER (WHERE upper(trim(coalesce(ca.severity, ''))) IN ('HIGH', 'CRITICAL')) AS high_critical
+        FROM {COMPLIANCE_SCHEMA}.compliance_audit_results ca
+        {where_sql}
+    """
+
+    with _db_connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(count_query, params)
+            total = int(cur.fetchone()["total"])
+            cur.execute(summary_query, params)
+            summary = dict(cur.fetchone())
+            cur.execute(query, [*params, size, offset])
+            rows = [dict(row) for row in cur.fetchall()]
+
+    items = [_serialize_compliance_row(row) for row in rows]
+    COMPLIANCE_CACHE[cache_key] = (time.time(), items, summary, total)
+    return items, summary, total
+
+
+def _load_treaty_timeline(session_id: str):
+    if not DATABASE_URL:
+        return []
+    query = f"""
+        SELECT
+          audit_id,
+          session_id,
+          email_id,
+          sender_email,
+          event_type,
+          event_status,
+          event_data,
+          created_at
+        FROM {COMPLIANCE_SCHEMA}.treaty_audit_logs
+        WHERE session_id = %s
+        ORDER BY created_at ASC, audit_id ASC
+    """
+    with _db_connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, [session_id])
+            return [dict(row) for row in cur.fetchall()]
+
+
+def _detail_for_compliance(row: dict[str, Any]):
+    session_id = row.get("session_id")
+    timeline = _load_treaty_timeline(session_id) if session_id else []
+    return {
+        **_serialize_compliance_row(row),
+        "timeline": [
+            {
+                "audit_id": item.get("audit_id"),
+                "session_id": item.get("session_id"),
+                "email_id": item.get("email_id"),
+                "sender_email": item.get("sender_email"),
+                "event_type": item.get("event_type"),
+                "event_status": item.get("event_status"),
+                "event_data": _json_value(item.get("event_data")),
+                "created_at": _normalize_datetime(item.get("created_at")),
+            }
+            for item in timeline
+        ],
+    }
+
+
+@app.get("/api/compliance/treaty")
+def get_treaty_compliance(
+    q: Optional[str] = None,
+    compliance_status: Optional[str] = None,
+    severity: Optional[str] = None,
+    action_type: Optional[str] = None,
+    verification_status: Optional[str] = None,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    page: int = 1,
+    size: int = 20,
+):
+    page = max(1, page)
+    size = max(1, min(size, 100))
+    filters = {
+        "q": q,
+        "compliance_status": compliance_status,
+        "severity": severity,
+        "action_type": action_type,
+        "verification_status": verification_status,
+        "from": from_ts,
+        "to": to_ts,
+        "page": page,
+        "size": size,
+    }
+    try:
+        items, summary, total = _load_treaty_compliance(filters)
+    except Exception as exc:
+        logger.exception("Treaty compliance query failed")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "source": "error",
+                "items": [],
+                "total": 0,
+                "page": page,
+                "pages": 1,
+                "summary": {
+                    "total_actions": 0,
+                    "compliant": 0,
+                    "violations": 0,
+                    "unverifiable": 0,
+                    "high_critical": 0,
+                },
+                "message": "Failed to load Treaty compliance data",
+            },
+        )
+
+    pages = max(1, math.ceil(total / size))
+    return {
+        "source": "live",
+        "items": items,
+        "total": total,
+        "page": page,
+        "pages": pages,
+        "summary": {
+            "total_actions": int(summary.get("total_actions") or 0),
+            "compliant": int(summary.get("compliant") or 0),
+            "violations": int(summary.get("violations") or 0),
+            "unverifiable": int(summary.get("unverifiable") or 0),
+            "high_critical": int(summary.get("high_critical") or 0),
+        },
+    }
+
+
+@app.get("/api/compliance/treaty/{audit_id}")
+def get_treaty_compliance_detail(audit_id: str):
+    if not DATABASE_URL:
+        return JSONResponse(
+            status_code=500,
+            content={"source": "error", "message": "DATABASE_URL is not configured"},
+        )
+
+    query = f"""
+        SELECT *
+        FROM {COMPLIANCE_SCHEMA}.compliance_audit_results
+        WHERE id::text = %s OR treaty_audit_id::text = %s
+        ORDER BY created_at DESC NULLS LAST, id DESC
+        LIMIT 1
+    """
+    try:
+        with _db_connect() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(query, [audit_id, audit_id])
+                row = cur.fetchone()
+    except Exception as exc:
+        logger.exception("Treaty compliance detail query failed for audit identifier")
+        return JSONResponse(
+            status_code=500,
+            content={"source": "error", "message": "Failed to load Treaty compliance detail"},
+        )
+
+    if not row:
+        return JSONResponse(
+            status_code=404,
+            content={"source": "error", "message": "Compliance action not found"},
+        )
+
+    return _detail_for_compliance(dict(row))
 
 
 def _build_request_html(kind: str, fields: dict, agent_label: str):

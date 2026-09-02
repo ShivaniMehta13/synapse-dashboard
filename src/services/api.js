@@ -208,7 +208,7 @@ export async function fetchAgents(email = "") {
     const query = params.toString();
     const url = query ? buildUrl(`/api/agents?${query}`) : buildUrl("/api/agents");
     const res = await fetch(url, { headers: _authHeaders() });
-    if (!res.ok) throw new Error(`API responded with ${res.status}`);
+    if (!res.ok) throw new Error(await parseApiMessage(res));
     const json = await res.json();
     return Array.isArray(json) ? json : [];
   } catch (error) {
@@ -316,5 +316,58 @@ export async function fetchTraceDetails(traceId, traces = [], agentId = "all") {
   } catch (error) {
     console.error("[synapse api] fetchTraceDetails failed:", error);
     return null;
+  }
+}
+
+export async function fetchTreatyCompliance(params = {}) {
+  if (!API_BASE_URL) {
+    return {
+      source: "error",
+      items: [],
+      total: 0,
+      page: 1,
+      pages: 1,
+      summary: { total_actions: 0, compliant: 0, violations: 0, unverifiable: 0, high_critical: 0 },
+      error: "API base URL is not configured",
+    };
+  }
+
+  try {
+    const query = new URLSearchParams();
+    if (params.q) query.set("q", params.q);
+    if (params.compliance_status && params.compliance_status !== "ALL") query.set("compliance_status", params.compliance_status);
+    if (params.severity && params.severity !== "ALL") query.set("severity", params.severity);
+    if (params.action_type && params.action_type !== "ALL") query.set("action_type", params.action_type);
+    if (params.verification_status && params.verification_status !== "ALL") query.set("verification_status", params.verification_status);
+    if (params.from_ts) query.set("from_ts", params.from_ts);
+    if (params.to_ts) query.set("to_ts", params.to_ts);
+    query.set("page", String(params.page || 1));
+    query.set("size", String(params.size || 20));
+    const res = await fetch(buildUrl(`/api/compliance/treaty?${query.toString()}`), { headers: _authHeaders() });
+    if (!res.ok) throw new Error(await parseApiMessage(res));
+    return await res.json();
+  } catch (error) {
+    console.error("[synapse api] fetchTreatyCompliance failed:", error);
+    return {
+      source: "error",
+      items: [],
+      total: 0,
+      page: 1,
+      pages: 1,
+      summary: { total_actions: 0, compliant: 0, violations: 0, unverifiable: 0, high_critical: 0 },
+      error: error.message || "Failed to fetch compliance data",
+    };
+  }
+}
+
+export async function fetchTreatyComplianceDetail(auditId) {
+  if (!API_BASE_URL) return { source: "error", message: "API base URL is not configured" };
+  try {
+    const res = await fetch(buildUrl(`/api/compliance/treaty/${encodeURIComponent(auditId)}`), { headers: _authHeaders() });
+    if (!res.ok) throw new Error(await parseApiMessage(res));
+    return await res.json();
+  } catch (error) {
+    console.error("[synapse api] fetchTreatyComplianceDetail failed:", error);
+    return { source: "error", message: error.message || "Failed to fetch compliance detail" };
   }
 }
