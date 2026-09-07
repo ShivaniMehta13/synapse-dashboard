@@ -89,6 +89,11 @@ TRACE_FLOW_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 COMPLIANCE_CACHE_TTL_SECONDS = 30
 COMPLIANCE_CACHE: dict[str, tuple[float, list[dict[str, Any]], dict[str, int], int]] = {}
 
+# Cache merged "all agents" trace results per email to avoid repeated wide fetches
+# Use 60s TTL so repeated navigations within a minute hit cache
+EMAIL_TRACES_CACHE_TTL_SECONDS = 60
+EMAIL_TRACES_CACHE: dict[str, tuple[float, list[dict[str, Any]], list[dict[str, str]]]] = {}
+
 
 def _normalize_email(email: str) -> str:
     return (email or "").strip().lower()
@@ -302,6 +307,7 @@ def _fetch_traces_for_agents(agents: list[dict[str, Any]]):
         return all_traces, partial_errors
 
     max_workers = min(10, len(agents))
+    start_ts = time.time()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_get_cached_flow_traces, agent["flow_id"], agent["api_key"], agent["tool_name"]): agent
@@ -318,6 +324,8 @@ def _fetch_traces_for_agents(agents: list[dict[str, Any]]):
                 partial_errors.append({"agent_id": agent["id"], "error": error})
                 continue
             all_traces.extend(_tag_trace(trace, agent) for trace in traces or [])
+    elapsed = time.time() - start_ts
+    logger.debug(f"_fetch_traces_for_agents: fetched traces from {len(agents)} agents in {elapsed:.2f}s; total_traces={len(all_traces)}; partial_errors={len(partial_errors)}")
 
     all_traces.sort(key=lambda t: t.get("startTime", ""), reverse=True)
     return all_traces, partial_errors
@@ -852,7 +860,21 @@ def get_traces(agent_id: str = "all", page: int = 1, size: int = 20, email: Opti
             return _error_response(error)
         all_traces = [_tag_trace(trace, agent) for trace in all_traces]
     else:
-        all_traces, partial_errors = _fetch_traces_for_agents(agents_for_scope)
+        # For the broad "all agents" case, try per-email merged cache first
+        cached_key = _normalize_email(email) or ""
+        if cached_key:
+            cached = EMAIL_TRACES_CACHE.get(cached_key)
+            if cached and time.time() - cached[0] < EMAIL_TRACES_CACHE_TTL_SECONDS:
+                all_traces, partial_errors = cached[1], cached[2]
+            else:
+                start = time.time()
+                all_traces, partial_errors = _fetch_traces_for_agents(agents_for_scope)
+                EMAIL_TRACES_CACHE[cached_key] = (time.time(), all_traces, partial_errors)
+                logger.info(f"get_traces: fetched all-agents traces for email={cached_key} in {time.time()-start:.2f}s; traces={len(all_traces)}; partial_errors={len(partial_errors)}")
+        else:
+            start = time.time()
+            all_traces, partial_errors = _fetch_traces_for_agents(agents_for_scope)
+            logger.info(f"get_traces: fetched all-agents traces (no-email) in {time.time()-start:.2f}s; traces={len(all_traces)}; partial_errors={len(partial_errors)}")
 
     total = len(all_traces)
     pages = max(1, math.ceil(total / size))
@@ -897,6 +919,18 @@ def get_trace_detail(trace_id: str, agent_id: str = "all", email: Optional[str] 
             if match:
                 return _tag_trace(match, agents[0])
     else:
+        # If an email-specific merged cache exists, check it first to avoid wide fetches
+        cached_key = _normalize_email(email) or ""
+        if cached_key:
+            cached = EMAIL_TRACES_CACHE.get(cached_key)
+            if cached and time.time() - cached[0] < EMAIL_TRACES_CACHE_TTL_SECONDS:
+                cached_traces = cached[1] or []
+                match = next((t for t in cached_traces if t.get("id") == trace_id), None)
+                if match:
+                    # We don't know the originating agent metadata here, so attach a best-effort tag
+                    agent = next((a for a in agents if a.get("flow_id") == match.get("flowId")), agents[0])
+                    return _tag_trace(match, agent)
+
         with ThreadPoolExecutor(max_workers=min(10, len(agents))) as executor:
             futures = {
                 executor.submit(_get_cached_flow_traces, agent["flow_id"], agent["api_key"], agent["tool_name"]): agent

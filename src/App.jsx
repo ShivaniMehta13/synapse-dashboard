@@ -338,6 +338,10 @@ details.syn-details > .syn-details-body { padding: 4px 13px 13px; border-top:1px
   display:flex; align-items:center; justify-content:center; margin: 0 auto 12px;
 }
 
+/* simple spinner for loading states */
+.syn-spinner { display:inline-block; width:20px; height:20px; border-radius:50%; border:3px solid var(--line-strong); border-top-color:var(--accent); animation: syn-spin .9s linear infinite; margin-right:8px; }
+@keyframes syn-spin { to { transform: rotate(360deg); } }
+
 /* responsive */
 .syn-menu-btn { display:none; }
 @media (min-width: 1700px) {
@@ -1258,7 +1262,12 @@ function ComplianceDrawer({ item, detail, onClose, loading }) {
           </button>
         </div>
         <div className="syn-drawer-body">
-          {loading && <p style={{ color: "var(--muted)" }}>Loading…</p>}
+          {loading && (
+            <div style={{ color: "var(--muted)", display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="syn-spinner" aria-hidden="true" />
+              <span>Loading…</span>
+            </div>
+          )}
           <div className="syn-kv">
             <div className="k">Audit ID</div><div className="v syn-mono">{normalizeText(row.audit_id || row.treaty_audit_id || row.id)}</div>
             <div className="k">Agent</div><div className="v">{normalizeText(row.agent_name)}</div>
@@ -1440,7 +1449,7 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
 
       {error && <div className="syn-login-message err">{error}</div>}
 
-      <section className="syn-card" style={{ marginBottom: 14 }}>
+      <section className="syn-card" style={{ marginBottom: 18 }}>
         <div className="syn-row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <div className="syn-label">Compliance Policies</div>
@@ -1466,7 +1475,7 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
         )}
       </section>
 
-      <div className="syn-metrics">
+      <div className="syn-metrics" style={{ marginTop: 8, marginBottom: 18 }}>
         <Metric label="Total Actions" value={summary.total_actions || 0} tone="accent" sub="Compliance records" />
         <Metric label="Compliant" value={summary.compliant || 0} tone="ok" sub="Actions that passed review" />
         <Metric label="Violations" value={summary.violations || 0} tone="err" sub="Actions that failed policy" />
@@ -1474,7 +1483,7 @@ function CompliancePage({ onRefreshSignal, selectedAgentId }) {
         <Metric label="High / Critical Issues" value={summary.high_critical || 0} tone="err" sub="Escalation candidates" />
       </div>
 
-      <div className="syn-filters">
+      <div className="syn-filters" style={{ marginBottom: 16 }}>
         <div className="syn-search" style={{ maxWidth: 420 }}>
           <Icon d={ICONS.search} size={14} />
           <input placeholder="Search audit ID, session ID, email ID, sender, action, policy…" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -1595,18 +1604,20 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
   }, [loggedInEmail]);
   useEffect(() => {
     let active = true;
-    fetchAgents(loggedInEmail).then((items) => {
+    (async () => {
+      const items = await fetchAgents(loggedInEmail);
       if (!active) return;
       setAgents(items);
-      setSelectedAgentId((current) => {
-        if (current !== "all") return current;
-        if (items.length > 1) return items[0]?.id || "all";
-        return "all";
-      });
-    });
+      // Keep selectedAgentId as-is (default to "all" on login). Do not auto-select a single agent.
+    })();
     return () => { active = false; };
   }, [loggedInEmail]);
-  useEffect(() => { load(1, selectedAgentId); }, [load, selectedAgentId]);
+
+  // Only load traces once an initial agent selection exists.
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    load(1, selectedAgentId);
+  }, [load, selectedAgentId]);
 
   const onAgentChange = (event) => {
     const nextAgentId = event.target.value || "all";
@@ -1689,7 +1700,14 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
             </div>
           )}
           {loading && metrics.total === 0 ? (
-            <p style={{ color: "var(--muted)" }}>Loading…</p>
+            <div style={{ color: "var(--muted)", display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="syn-spinner" aria-hidden="true" />
+              {selectedAgentId === "all" ? (
+                <span>Loading data for {Math.max(agents.length, 1)} agent{agents.length !== 1 ? "s" : ""}…</span>
+              ) : (
+                <span>Loading…</span>
+              )}
+            </div>
           ) : (
             <>
               {page === "overview" && (
