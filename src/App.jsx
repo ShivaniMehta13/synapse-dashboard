@@ -1699,7 +1699,7 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
               </span>
             </div>
           )}
-          {loading && metrics.total === 0 ? (
+          {loading && metrics.total === 0 && (
             <div style={{ color: "var(--muted)", display: 'flex', alignItems: 'center', gap: 8 }}>
               <span className="syn-spinner" aria-hidden="true" />
               {selectedAgentId === "all" ? (
@@ -1708,8 +1708,8 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
                 <span>Loading…</span>
               )}
             </div>
-          ) : (
-            <>
+          )}
+          <>
               {page === "overview" && (
                 <OverviewPage
                   metrics={metrics}
@@ -1750,8 +1750,7 @@ export default function SynapseDashboard({ onLogout, loggedInEmail = "" }) {
                   selectedAgentId={selectedAgentId}
                 />
               )}
-            </>
-          )}
+          </>
         </main>
       </div>
 

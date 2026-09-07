@@ -21,29 +21,7 @@ def login(payload: LoginRequest):
     if not email:
         return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"message": "Email is required"})
 
-    try:
-        from backend.main import fetch_flows_for_email
-    except ImportError:
-        from main import fetch_flows_for_email
-
-    try:
-        flows = fetch_flows_for_email(email)
-    except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "message": "We couldn't find any agents for this email — check with your team.",
-                "detail": str(exc),
-            },
-        )
-
-    if flows is not None:
-        return {"message": "Logged in", "email": email}
-
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"message": "We couldn't find any agents for this email — check with your team."},
-    )
+    return {"message": "Logged in", "email": email}
 
 
 @router.post("/logout")
